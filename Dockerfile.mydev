@@ -1,0 +1,44 @@
+FROM iseekyan/verl:nemo.gptoss_vllm0.11.0
+
+RUN pip install --no-deps --no-build-isolation --no-cache-dir
+# 1. Set up workspace directories and symlinks
+RUN mkdir -p /root/myCodeLab && \
+    ln -s /public /root/myCodeLab/public && \
+    ln -s /public/lichang93/stCodeLab /root/myCodeLab/host
+
+# 2. Configure the shell by appending your custom settings
+COPY to_append.sh /tmp/to_append.sh
+RUN echo "" >> /root/.bashrc && \
+    cat /tmp/to_append.sh >> /root/.bashrc && \
+    rm /tmp/to_append.sh
+
+# 3. Configure tmux and install its plugin manager (assumes git is pre-installed)
+COPY .tmux.conf /root/.tmux.conf
+
+# 4. Install your project's Python dependencies
+# RUN rm ~/.config/pip/pip.conf && pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+# RUN chown -R root:root /usr/lib
+
+# 5. Log in to Weights & Biases
+RUN wandb login df3cecbfc0874c8a352c40820becf4a15575614e
+
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat
+# RUN apt-get install pdsh tmux htop -y
+RUN apt-get update && apt-get install pdsh tmux htop -y
+COPY verl /root/myCodeLab/host/verl/
+RUN cd /root/myCodeLab/host/verl && pip install -e . && cd /root/myCodeLab/host/ && rm -rf verl
+
+# Set the final working directory and default command
+WORKDIR /root/myCodeLab
+CMD ["/bin/bash"]
+# docker build --network host -t registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_yan .
+# docker run -itd -v /mnt/public:/public --name verlvllm --network host registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
+# dbash verlvllm
+# drm verlvllm
+# docker build -t registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow .
+# docker run -itd -v /mnt/public:/public --name verlvllm --network host registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
+# dbash verlvllm
+# docker commit verlvllm registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
+# docker push registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
+

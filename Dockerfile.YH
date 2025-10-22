@@ -1,0 +1,78 @@
+#Use the pytorch image which has CUDA 12.9 inside.
+FROM nvcr.io/nvidia/pytorch:25.04-py3 as base
+ENV SHELL /bin/bash
+
+# Remove old megatron-lm, update apt, install system packages, and install yq
+RUN rm -rf /opt/megatron-lm && \
+    sed -i 's|http://.*.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y sudo gdb pstack bash-builtins git zsh autojump tmux curl gettext libfabric-dev && \
+    wget https://github.com/mikefarah/yq/releases/download/v4.27.5/yq_linux_amd64 -O /usr/bin/yq && \
+    chmod +x /usr/bin/yq
+
+# Install Python packages
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    debugpy dm-tree torch_tb_profiler einops wandb \
+    sentencepiece tokenizers transformers torchvision ftfy modelcards datasets tqdm pydantic \
+    nvidia-pytriton py-spy yapf darker pytest-cov pytest_mock \
+    black==25.1.0 isort==6.0.1 flake8==7.1.0 pylint coverage mypy \
+    setuptools==78.1.0
+
+# Install legacy grouped_gemm
+RUN TORCH_CUDA_ARCH_LIST="8.0 9.0" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4
+
+# Install TE with 1. sub-channel fp8 recipe; 2. bf16 optimzer state; 3. sub-channel fp8 grouped linear; 4. fp8 primary weights
+## Use a specific commit instead of main to make it more stable.
+WORKDIR /opt
+RUN git clone https://github.com/NVIDIA/TransformerEngine.git && cd TransformerEngine && git checkout b9e7b0b8c459af39c53f9804e6b3b8434dc66f50 && \
+    git submodule update --init --recursive && \
+    unset PIP_CONSTRAINT && NVTE_FRAMEWORK=pytorch NVTE_CUDA_ARCHS="80;90" NVTE_BUILD_THREADS_PER_JOB=8 pip install -i  https://pypi.tuna.tsinghua.edu.cn/simple -e . -v
+
+## Clone and build deepep and deepep-nvshmem
+WORKDIR /home/dpsk_a2a
+RUN git clone -b v2.4.4 https://github.com/NVIDIA/gdrcopy.git && \
+    git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && \
+    cd /home/dpsk_a2a && \
+    wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz && \
+    tar -xvf nvshmem_src_3.2.5-1.txz && mv nvshmem_src deepep-nvshmem && \
+    cd deepep-nvshmem && git apply /home/dpsk_a2a/DeepEP/third-party/nvshmem.patch && \
+    sed -i '16i#include <getopt.h>' /home/dpsk_a2a/deepep-nvshmem/examples/moe_shuffle.cu
+
+ENV CUDA_HOME=/usr/local/cuda
+### Set MPI environment variables. Having errors when not set.
+ENV CPATH=/usr/local/mpi/include:$CPATH
+ENV LD_LIBRARY_PATH=/usr/local/mpi/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+ENV GDRCOPY_HOME=/home/dpsk_a2a/gdrcopy
+
+## the dependency of IBGDA
+RUN ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
+
+## Build deepep-nvshmem
+WORKDIR /home/dpsk_a2a/deepep-nvshmem
+RUN NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/home/dpsk_a2a/deepep-nvshmem/install -DCMAKE_CUDA_ARCHITECTURES=90 && cd build && make install -j
+
+## Build deepep
+WORKDIR /home/dpsk_a2a/DeepEP
+ENV NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install
+RUN unset TORCH_CUDA_ARCH_LIST &&  NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install python setup.py develop && \
+    NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install python setup.py install
+
+## Clone and build nccl 2.21.5
+RUN apt-get install -y check
+RUN git clone https://github.com/NVIDIA/nccl.git && cd nccl/ && git checkout tags/v2.21.5-1 && \
+    make -j$(nproc) && make install 
+ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+## Clone Megatron-LM
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git && \
+    cd Megatron-LM
+WORKDIR /home/dpsk_a2a/DeepEP/Megatron-LM
+RUN apt-get install -y check
