@@ -1,6 +1,6 @@
 # Start from the NVIDIA official image (ubuntu-24.04 + cuda-12.8 + python-3.12)
 # https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-03.html
-FROM nvcr.io/nvidia/pytorch:25.03-py3
+FROM registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_dep
 
 # Define environments
 ENV MAX_JOBS=32
@@ -19,88 +19,5 @@ RUN pip config set global.index-url "${PIP_INDEX}" && \
     pip config set global.no-cache-dir "true" && \
     python -m pip install --upgrade pip
 
-# Install systemctl
-RUN apt-get update && \
-    apt-get install -y -o Dpkg::Options::="--force-confdef" systemd && \
-    apt-get clean
-
-# Install libxml2
-RUN apt-get update && \
-    apt-get install -y libxml2 aria2 && \
-    apt-get clean
-
-# Uninstall nv-pytorch fork
-RUN pip uninstall -y torch torchvision torchaudio \
-    pytorch-quantization pytorch-triton torch-tensorrt \
-    transformer_engine flash_attn apex megatron-core \
-    xgboost opencv grpcio
-
-# Fix packages
-RUN pip install --no-cache-dir tensordict torchdata "transformers[hf_xet]==4.55.4" accelerate datasets peft hf-transfer \
-    "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
-    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
-    pytest py-spy pre-commit ruff
-
-# Fix cv2
-RUN rm -rf /usr/local/lib/python3.11/dist-packages/cv2
-
-# Install torch
-RUN pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-
-# Install flash-attn
-RUN MAX_JOBS=5 pip install --no-cache-dir --no-build-isolation flash_attn==2.7.4.post1
-
-# Install DeepEP
-# the dependency of IBGDA
-RUN ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
-
-# Clone and build deepep and deepep-nvshmem
-RUN apt-get update && \
-    apt-get install -y wget gpg && \
-    wget https://developer.download.nvidia.com/compute/nvshmem/3.4.5/local_installers/nvshmem-local-repo-ubuntu2404-3.4.5_3.4.5-1_amd64.deb && \
-    dpkg -i nvshmem-local-repo-ubuntu2404-3.4.5_3.4.5-1_amd64.deb && \
-    cp /var/nvshmem-local-repo-ubuntu2404-3.4.5/nvshmem-*-keyring.gpg /usr/share/keyrings/ && \
-    apt-get update && \
-    apt-get install -y nvshmem nvshmem-cuda-12 && \
-    # Clean up downloaded files and apt cache to keep the image small
-    rm nvshmem-local-repo-ubuntu2404-3.4.5_3.4.5-1_amd64.deb && \
-    rm -rf /var/lib/apt/lists/*
-
-## Build Helpers
-RUN apt-get update && apt-get install -y ninja-build cmake && \
-    rm -rf /var/lib/apt/lists/*
-
-# ### Set MPI environment variables. Having errors when not set.
-ENV CUDA_HOME=/usr/local/cuda
-ENV CPATH=/usr/local/mpi/include:$CPATH
-ENV LD_LIBRARY_PATH=/usr/local/mpi/lib:$LD_LIBRARY_PATH
-ENV GDRCOPY_HOME=/workspace/gdrcopy
-ENV GDRCOPY_INCLUDE=/workspace/gdrcopy/include
-
-## Build deepep
-RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
-    git clone https://github.com/deepseek-ai/DeepEP.git && \
-    cd DeepEP && \
-    git checkout 2be0d4f8e9b555510139307bb3b0947834f34c37 && \
-    TORCH_CUDA_ARCH_LIST="9.0" python setup.py install
-
-ARG http_proxy="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
-ARG https_proxy="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
-ARG HTTP_PROXY="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
-ARG HTTPS_PROXY="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
-
-# Install Apex
-RUN pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
-
-# Install TransformerEngine
-RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=5 pip3 install --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.2.1
-
-# Install Megatron-LM
-RUN git clone -b core_v0.13.0 https://github.com/NVIDIA/Megatron-LM.git && \
-    cd Megatron-LM && pip3 install --no-deps -e .
-
-# Install mbridge
-RUN pip3 install --no-cache-dir mbridge
+# Install VLLM
 RUN pip3 install --no-cache-dir --no-build-isolation "numpy<2.0.0" "vllm==0.11.0"
-
-# docker build --network host -f Dockerfile.0d6_vllm -t registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_dep .

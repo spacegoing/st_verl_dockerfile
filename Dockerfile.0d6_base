@@ -48,61 +48,58 @@ RUN rm -rf /usr/local/lib/python3.11/dist-packages/cv2
 RUN pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
 # Install flash-attn
-RUN pip install --no-cache-dir --no-build-isolation flash_attn==2.7.4.post1
+RUN MAX_JOBS=5 pip install --no-cache-dir --no-build-isolation flash_attn==2.7.4.post1
 
 # Install DeepEP
 # the dependency of IBGDA
 RUN ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
 
 # Clone and build deepep and deepep-nvshmem
-RUN git clone -b v2.3.1 https://github.com/NVIDIA/gdrcopy.git && \
-    git clone https://github.com/deepseek-ai/DeepEP.git  && \
-    cd DeepEP && git checkout a84a248
+RUN apt-get update && \
+    apt-get install -y wget gpg && \
+    wget https://developer.download.nvidia.com/compute/nvshmem/3.4.5/local_installers/nvshmem-local-repo-ubuntu2404-3.4.5_3.4.5-1_amd64.deb && \
+    dpkg -i nvshmem-local-repo-ubuntu2404-3.4.5_3.4.5-1_amd64.deb && \
+    cp /var/nvshmem-local-repo-ubuntu2404-3.4.5/nvshmem-*-keyring.gpg /usr/share/keyrings/ && \
+    apt-get update && \
+    apt-get install -y nvshmem nvshmem-cuda-12 && \
+    # Clean up downloaded files and apt cache to keep the image small
+    rm nvshmem-local-repo-ubuntu2404-3.4.5_3.4.5-1_amd64.deb && \
+    rm -rf /var/lib/apt/lists/*
 
-# Prepare nvshmem
-RUN wget https://developer.nvidia.com/downloads/assets/secure/nvshmem/nvshmem_src_3.2.5-1.txz && \
-    tar -xvf nvshmem_src_3.2.5-1.txz && mv nvshmem_src deepep-nvshmem && \
-    cd deepep-nvshmem && git apply ../DeepEP/third-party/nvshmem.patch
+## Build Helpers
+RUN apt-get update && apt-get install -y ninja-build cmake && \
+    rm -rf /var/lib/apt/lists/*
 
-## Build deepep-nvshmem
-RUN apt-get install -y ninja-build cmake
-
+# ### Set MPI environment variables. Having errors when not set.
 ENV CUDA_HOME=/usr/local/cuda
-### Set MPI environment variables. Having errors when not set.
 ENV CPATH=/usr/local/mpi/include:$CPATH
 ENV LD_LIBRARY_PATH=/usr/local/mpi/lib:$LD_LIBRARY_PATH
-ENV LD_LIBRARY_PATH=/usr/local/x86_64-linux-gnu:$LD_LIBRARY_PATH
 ENV GDRCOPY_HOME=/workspace/gdrcopy
 ENV GDRCOPY_INCLUDE=/workspace/gdrcopy/include
 
-RUN cd deepep-nvshmem && \
-    NVSHMEM_SHMEM_SUPPORT=0 \
-    NVSHMEM_UCX_SUPPORT=0 \
-    NVSHMEM_USE_NCCL=0 \
-    NVSHMEM_MPI_SUPPORT=0 \
-    NVSHMEM_IBGDA_SUPPORT=1 \
-    NVSHMEM_PMIX_SUPPORT=0 \
-    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    NVSHMEM_USE_GDRCOPY=1 \
-    cmake -G Ninja -S . -B build/ -DCMAKE_INSTALL_PREFIX=/workspace/deepep-nvshmem/install && cmake --build build/ --target install
-
-ENV NVSHMEM_DIR=/workspace/deepep-nvshmem/install
-ENV LD_LIBRARY_PATH=$NVSHMEM_DIR/lib:$LD_LIBRARY_PATH
-ENV PATH=$NVSHMEM_DIR/bin:$PATH
-
 ## Build deepep
-RUN cd DeepEP && \
-    python setup.py install
+RUN git clone -b v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
+    git clone https://github.com/deepseek-ai/DeepEP.git && \
+    cd DeepEP && \
+    git checkout 2be0d4f8e9b555510139307bb3b0947834f34c37 && \
+    TORCH_CUDA_ARCH_LIST="9.0" python setup.py install
+
+ARG http_proxy="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
+ARG https_proxy="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
+ARG HTTP_PROXY="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
+ARG HTTPS_PROXY="http://jdtcom:709a64b73eb3@10.119.176.202:3128"
 
 # Install Apex
 RUN pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
 # Install TransformerEngine
-RUN export NVTE_FRAMEWORK=pytorch && pip3 install --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.2.1
+RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=5 pip3 install --no-deps --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.2.1
 
 # Install Megatron-LM
 RUN git clone -b core_v0.13.0 https://github.com/NVIDIA/Megatron-LM.git && \
     cd Megatron-LM && pip3 install --no-deps -e .
 
 # Install mbridge
-RUN pip3 install --no-cache-dir git+https://github.com/ISEEKYAN/mbridge.git
+RUN pip3 install --no-cache-dir mbridge
+
+# docker build --network host -f Dockerfile.0d6_base -t registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_dep .
