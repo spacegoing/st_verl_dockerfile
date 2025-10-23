@@ -1,6 +1,5 @@
-FROM iseekyan/verl:nemo.gptoss_vllm0.11.0
+FROM registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_dep
 
-RUN pip install --no-deps --no-build-isolation --no-cache-dir
 # 1. Set up workspace directories and symlinks
 RUN mkdir -p /root/myCodeLab && \
     ln -s /public /root/myCodeLab/public && \
@@ -16,8 +15,8 @@ RUN echo "" >> /root/.bashrc && \
 COPY .tmux.conf /root/.tmux.conf
 
 # 4. Install your project's Python dependencies
-# RUN rm ~/.config/pip/pip.conf && pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+RUN rm ~/.config/pip/pip.conf && pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+# RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 # RUN chown -R root:root /usr/lib
 
 # 5. Log in to Weights & Biases
