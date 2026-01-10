@@ -1,5 +1,5 @@
-FROM verlai/verl:sgl056.latest
-# FROM verlai/verl:vllm011.2.dev3
+# FROM verlai/verl:sgl056.latest
+FROM verlai/verl:vllm011.2.dev3
 
 # 1. Set up workspace directories and symlinks
 RUN mkdir -p /root/myCodeLab && \
