@@ -1,4 +1,5 @@
-FROM registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_dep
+FROM verlai/verl:sgl056.latest
+# FROM verlai/verl:vllm011.2.dev3
 
 # 1. Set up workspace directories and symlinks
 RUN mkdir -p /root/myCodeLab && \
@@ -15,8 +16,8 @@ RUN echo "" >> /root/.bashrc && \
 COPY .tmux.conf /root/.tmux.conf
 
 # 4. Install your project's Python dependencies
-RUN rm ~/.config/pip/pip.conf && pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-# RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+# RUN rm ~/.config/pip/pip.conf && pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 # RUN chown -R root:root /usr/lib
 
 # 5. Log in to Weights & Biases
@@ -25,8 +26,18 @@ RUN wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat
 # RUN apt-get install pdsh tmux htop -y
 RUN apt-get update && apt-get install pdsh tmux htop -y
+# libnuma-dev
+
+COPY mbridge /root/myCodeLab/mbridge/
+RUN cd /root/myCodeLab/mbridge/ && \
+    pip3 install --no-deps -e .
+
 COPY verl /root/myCodeLab/host/verl/
-RUN cd /root/myCodeLab/host/verl && pip install -e . && cd /root/myCodeLab/host/ && rm -rf verl
+RUN cd /root/myCodeLab/host/verl && \
+    # pip3 install -e .[vllm] && \
+    # pip3 install -e .[sglang] && \
+    pip3 install --no-deps -e . && \
+    cd /root/myCodeLab/host/ && rm -rf verl
 
 # Set the final working directory and default command
 WORKDIR /root/myCodeLab
@@ -41,3 +52,14 @@ CMD ["/bin/bash"]
 # docker commit verlvllm registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
 # docker push registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
 
+# VLLM
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012.dev .
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm0113.dev .
+# docker run -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012.dev
+# docker run --entrypoint /bin/bash -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm0113.dev
+
+# SGLANG
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:sgl055.dev .
+# docker run -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:sgl055.dev
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:sgl056.dev .
+# docker run -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:sgl056.dev
