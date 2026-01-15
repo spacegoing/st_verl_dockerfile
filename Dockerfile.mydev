@@ -1,5 +1,5 @@
 # FROM verlai/verl:sgl056.latest
-FROM verlai/verl:vllm011.2.dev3
+FROM verlai/verl:vllm012.latest
 
 # 1. Set up workspace directories and symlinks
 RUN mkdir -p /root/myCodeLab && \
@@ -30,7 +30,8 @@ RUN apt-get update && apt-get install pdsh tmux htop -y
 
 COPY mbridge /root/myCodeLab/mbridge/
 RUN cd /root/myCodeLab/mbridge/ && \
-    pip3 install --no-deps -e .
+    pip3 install --no-cache-dir --no-deps . && \
+    cd .. && rm -rf mbridge
 
 COPY verl /root/myCodeLab/host/verl/
 RUN cd /root/myCodeLab/host/verl && \
@@ -38,6 +39,21 @@ RUN cd /root/myCodeLab/host/verl && \
     # pip3 install -e .[sglang] && \
     pip3 install --no-deps -e . && \
     cd /root/myCodeLab/host/ && rm -rf verl
+
+# COPY Megatron-LM /root/myCodeLab/Megatron-LM/
+# RUN cd /root/myCodeLab/Megatron-LM/ && \
+#     pip3 install --no-cache-dir --no-deps . && \
+#     cd /root/myCodeLab/host/ && rm -rf Megatron-LM
+
+#     # git checkout core_v0.14.0 && \
+
+# vllm 0.12 uses openai harmony gpt oss encode
+RUN mkdir -p /root/tiktoken_cache
+COPY o200k_base.tiktoken /root/tiktoken_cache/o200k_base.tiktoken
+ENV TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
+
+# for moonglight
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" blobfile
 
 # Set the final working directory and default command
 WORKDIR /root/myCodeLab
@@ -54,9 +70,13 @@ CMD ["/bin/bash"]
 
 # VLLM
 # docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012.dev .
-# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm0113.dev .
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm011mcore14.dev .
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm011mcore14blbnojit.dev .
+# docker run -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm011mcore14.dev
 # docker run -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012.dev
 # docker run --entrypoint /bin/bash -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm0113.dev
+
+# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012blbharm.dev .
 
 # SGLANG
 # docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:sgl055.dev .
