@@ -76,7 +76,7 @@ CMD ["/bin/bash"]
 # docker run -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012.dev
 # docker run --entrypoint /bin/bash -itd -v /mnt/public:/public --name vrl --network host registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm0113.dev
 
-# docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:vllm012blbharm.dev .
+# DOCKER_BUILDKIT=0 docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-hangzhou.aliyuncs.com/spacegoing/verl:vllm012blbharm.dev .
 
 # SGLANG
 # docker build -f Dockerfile.mydev --provenance=false --network host -t registry.cn-xn-01.sensecore.cn/ccr-xn/verl:sgl055.dev .
