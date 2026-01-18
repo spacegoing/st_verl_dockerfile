@@ -2,31 +2,24 @@
 FROM verlai/verl:vllm012.latest
 
 # 1. Set up workspace directories and symlinks
+RUN git config --global --add safe.directory '*'
 RUN mkdir -p /root/myCodeLab && \
     ln -s /public /root/myCodeLab/public && \
     ln -s /public/lichang93/stCodeLab /root/myCodeLab/host
 
-# 2. Configure the shell by appending your custom settings
-COPY to_append.sh /tmp/to_append.sh
-RUN echo "" >> /root/.bashrc && \
-    cat /tmp/to_append.sh >> /root/.bashrc && \
-    rm /tmp/to_append.sh
-
-# 3. Configure tmux and install its plugin manager (assumes git is pre-installed)
-COPY .tmux.conf /root/.tmux.conf
-
-# 4. Install your project's Python dependencies
+# 2. Install your project's Python dependencies
 # RUN rm ~/.config/pip/pip.conf && pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 # RUN chown -R root:root /usr/lib
 
-# 5. Log in to Weights & Biases
+# 3. Log in to Weights & Biases
 RUN wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 
-RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat
-# RUN apt-get install pdsh tmux htop -y
-RUN apt-get update && apt-get install pdsh tmux htop -y
+# 4. Install Dev Deps
+RUN apt-get update && apt-get install pdsh tmux htop vim -y
 # libnuma-dev
+
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat blobfile
 
 COPY mbridge /root/myCodeLab/mbridge/
 RUN cd /root/myCodeLab/mbridge/ && \
@@ -47,17 +40,51 @@ RUN cd /root/myCodeLab/host/verl && \
 
 #     # git checkout core_v0.14.0 && \
 
+################
+# PATCH B200 DEP
+################
+WORKDIR /home/dpsk_a2a/deepep-nvshmem
+RUN rm -rf build && \
+    cmake -S . -B build/ \
+    -DCMAKE_INSTALL_PREFIX=/home/dpsk_a2a/deepep-nvshmem/install \
+    -DCMAKE_CUDA_ARCHITECTURES="90;100" \
+    -DNVSHMEM_SHMEM_SUPPORT=0 \
+    -DNVSHMEM_UCX_SUPPORT=0 \
+    -DNVSHMEM_USE_NCCL=0 \
+    -DNVSHMEM_MPI_SUPPORT=0 \
+    -DNVSHMEM_IBGDA_SUPPORT=1 \
+    -DNVSHMEM_PMIX_SUPPORT=0 \
+    -DNVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    -DNVSHMEM_USE_GDRCOPY=1 && \
+    cd build && \
+    make install -j$(nproc)
+
+RUN rm -rf /home/dpsk_a2a/DeepEP
+COPY DeepEP /home/dpsk_a2a/DeepEP
+WORKDIR /home/dpsk_a2a/DeepEP
+ENV NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install
+# Install DeepEP
+RUN pip uninstall -y deep_ep && \
+    pip install -v --no-build-isolation .
+
+## Fragile Configs
 # vllm 0.12 uses openai harmony gpt oss encode
 RUN mkdir -p /root/tiktoken_cache
 COPY o200k_base.tiktoken /root/tiktoken_cache/o200k_base.tiktoken
 ENV TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
 
-# for moonglight
-RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" blobfile
+# .bashrc alias
+COPY to_append.sh /tmp/to_append.sh
+RUN echo "" >> /root/.bashrc && \
+    cat /tmp/to_append.sh >> /root/.bashrc && \
+    rm /tmp/to_append.sh
+COPY .tmux.conf /root/.tmux.conf
+RUN ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
 
 # Set the final working directory and default command
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
+
 # docker build --network host -t registry.cn-sh-01.sensecore.cn/jd-ccr/verl:0d6_vllm_yan .
 # docker run -itd -v /mnt/public:/public --name verlvllm --network host registry.cn-sh-01.sensecore.cn/jd-ccr/verl:devnow
 # dbash verlvllm
