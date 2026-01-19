@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y \
     python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
+ARG PIP_DEFAULT_TIMEOUT=1000
+ARG PIP_RETRIES=20
+
 RUN wget https://bootstrap.pypa.io/get-pip.py && \
     python3.12 get-pip.py && \
     rm get-pip.py
@@ -27,20 +30,21 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
 # install torch but uninstall old cudnn (at 0118 2016, it uses cudnn9.10, leads to TE NVTE_FUSED_ATTN False)
-RUN pip install torch==2.9.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129 && \
-    pip uninstall -y nvidia-cudnn-cu12
+RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 
 RUN pip install vllm==0.12.0
-
 RUN pip install pybind11
 
 # install newest (at 0118 2016, it uses cudnn9.17, TE NVTE_FUSED_ATTN requires cudnn>9.11 on B200)
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
-    apt-get update && \
-    apt-get -y install cudnn9-cuda-12 && \
-    rm -rf /var/lib/apt/lists/*
-ENV export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    apt-get update
+
+    # apt-get -y install cudnn9-cuda-12 && \
+    # rm -rf /var/lib/apt/lists/*
+# ENV export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+# Commented APT installed cuDNN, Conservative upgrade: only cuDNN to 9.11.1.4 for B200/TE compatibility
+RUN pip install nvidia-cudnn-cu12==9.11.1.4
 
 RUN pip install nvidia-mathdx
 
