@@ -26,17 +26,21 @@ RUN wget https://bootstrap.pypa.io/get-pip.py && \
 RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
-RUN pip install torch==2.9.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
+# install torch but uninstall old cudnn (at 0118 2016, it uses cudnn9.10, leads to TE NVTE_FUSED_ATTN False)
+RUN pip install torch==2.9.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129 && \
+    pip uninstall -y nvidia-cudnn-cu12
 
 RUN pip install vllm==0.12.0
 
 RUN pip install pybind11
 
+# install newest (at 0118 2016, it uses cudnn9.17, TE NVTE_FUSED_ATTN requires cudnn>9.11 on B200)
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     apt-get update && \
     apt-get -y install cudnn9-cuda-12 && \
     rm -rf /var/lib/apt/lists/*
+ENV export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
 RUN pip install nvidia-mathdx
 
@@ -124,4 +128,4 @@ RUN apt-get update && apt-get install -y curl \
 #     --build-arg HTTPS_PROXY="http://jdtcom:709a64b73eb3@10.119.176.202:3128" \
 #     --build-arg no_proxy="localhost,127.0.0.1" \
 #     --build-arg NO_PROXY="localhost,127.0.0.1" \
-#     -t jdea-registry.jd.com/cljd/verl:myyyvllm012.dev .
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:xxxx.dev .
