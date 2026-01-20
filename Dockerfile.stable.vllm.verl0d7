@@ -30,7 +30,7 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
 # install torch but uninstall old cudnn (at 0118 2016, it uses cudnn9.10, leads to TE NVTE_FUSED_ATTN False)
-RUN pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
+RUN pip install torch==2.9.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu129
 
 RUN pip install vllm==0.12.0
 RUN pip install pybind11
@@ -42,6 +42,7 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86
 
     # apt-get -y install cudnn9-cuda-12 && \
     # rm -rf /var/lib/apt/lists/*
+
 # ENV export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 # Commented APT installed cuDNN, Conservative upgrade: only cuDNN to 9.11.1.4 for B200/TE compatibility
 RUN pip install nvidia-cudnn-cu12==9.11.1.4
@@ -50,6 +51,8 @@ RUN pip install nvidia-mathdx
 
 RUN MAX_JOBS=128 pip install -v --disable-pip-version-check --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" git+https://github.com/NVIDIA/apex.git
 
+# Symlink cuDNN headers to CUDA include path so PyTorch extensions can find them
+RUN ln -sf /usr/local/lib/python3.12/dist-packages/nvidia/cudnn/include/cudnn*.h /usr/local/cuda/include/
 RUN export NVTE_FRAMEWORK=pytorch && MAX_JOBS=128 NVTE_BUILD_THREADS_PER_JOB=4 pip3 install --resume-retries 999 --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.10
 
 RUN pip install --upgrade transformers tokenizers
