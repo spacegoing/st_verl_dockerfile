@@ -1,5 +1,5 @@
 # FROM verlai/verl:sgl056.latest
-FROM verlai/verl:vllm012.latest
+FROM nvcr.io/nvidia/nemo:25.11.01
 
 # 1. Set up workspace directories and symlinks
 RUN git config --global --add safe.directory '*'
@@ -19,7 +19,7 @@ RUN wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 RUN apt-get update && apt-get install pdsh tmux htop vim -y
 # libnuma-dev
 
-RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat blobfile
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat codetiming tensordict mathruler pylatexenc
 
 COPY mbridge /root/myCodeLab/mbridge/
 RUN cd /root/myCodeLab/mbridge/ && \
@@ -32,40 +32,6 @@ RUN cd /root/myCodeLab/host/verl && \
     # pip3 install -e .[sglang] && \
     pip3 install --no-deps -e . && \
     cd /root/myCodeLab/host/ && rm -rf verl
-
-# COPY Megatron-LM /root/myCodeLab/Megatron-LM/
-# RUN cd /root/myCodeLab/Megatron-LM/ && \
-#     pip3 install --no-cache-dir --no-deps . && \
-#     cd /root/myCodeLab/host/ && rm -rf Megatron-LM
-
-#     # git checkout core_v0.14.0 && \
-
-################
-# PATCH B200 DEP
-################
-WORKDIR /home/dpsk_a2a/deepep-nvshmem
-RUN rm -rf build && \
-    cmake -S . -B build/ \
-    -DCMAKE_INSTALL_PREFIX=/home/dpsk_a2a/deepep-nvshmem/install \
-    -DCMAKE_CUDA_ARCHITECTURES="90;100" \
-    -DNVSHMEM_SHMEM_SUPPORT=0 \
-    -DNVSHMEM_UCX_SUPPORT=0 \
-    -DNVSHMEM_USE_NCCL=0 \
-    -DNVSHMEM_MPI_SUPPORT=0 \
-    -DNVSHMEM_IBGDA_SUPPORT=1 \
-    -DNVSHMEM_PMIX_SUPPORT=0 \
-    -DNVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-    -DNVSHMEM_USE_GDRCOPY=1 && \
-    cd build && \
-    make install -j$(nproc)
-
-RUN rm -rf /home/dpsk_a2a/DeepEP
-COPY DeepEP /home/dpsk_a2a/DeepEP
-WORKDIR /home/dpsk_a2a/DeepEP
-ENV NVSHMEM_DIR=/home/dpsk_a2a/deepep-nvshmem/install
-# Install DeepEP
-RUN pip uninstall -y deep_ep && \
-    pip install -v --no-build-isolation .
 
 ## Fragile Configs
 # vllm 0.12 uses openai harmony gpt oss encode
@@ -80,6 +46,16 @@ RUN echo "" >> /root/.bashrc && \
     rm /tmp/to_append.sh
 COPY .tmux.conf /root/.tmux.conf
 RUN ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
+
+# Missing deps
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" torchdata
+# VLLM 0.12.0 (was 0.10.0)
+RUN rm -rf /opt/vllm && \
+    pip install setuptools_scm
+
+ENV TORCH_CUDA_ARCH_LIST="10.0"
+COPY vllm /opt/vllm
+RUN cd /opt/vllm && MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
 
 # Set the final working directory and default command
 WORKDIR /root/myCodeLab
