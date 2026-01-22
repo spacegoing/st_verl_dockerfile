@@ -56,6 +56,7 @@ RUN rm -rf /opt/vllm && \
 COPY vllm /opt/vllm
 RUN cd /opt/vllm && \
     MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" model_hosting_container_standards anthropic
 
 # Set the final working directory and default command
 WORKDIR /root/myCodeLab
