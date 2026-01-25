@@ -19,8 +19,17 @@ RUN wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 RUN apt-get update && apt-get install pdsh tmux htop vim -y
 # libnuma-dev
 
-RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat codetiming tensordict mathruler pylatexenc
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" gpustat codetiming tensordict mathruler pylatexenc torchdata
 
+# VLLM 0.12.0 (was 0.10.0)
+RUN rm -rf /opt/vllm && \
+    pip install setuptools_scm
+COPY vllm /opt/vllm
+RUN cd /opt/vllm && \
+    MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
+RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" model_hosting_container_standards anthropic
+
+# Other deps
 COPY mbridge /root/myCodeLab/mbridge/
 RUN cd /root/myCodeLab/mbridge/ && \
     pip3 install --no-cache-dir --no-deps . && \
@@ -48,15 +57,7 @@ COPY .tmux.conf /root/.tmux.conf
 RUN ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
 
 # Missing deps
-RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" torchdata
-# VLLM 0.12.0 (was 0.10.0)
-RUN rm -rf /opt/vllm && \
-    pip install setuptools_scm
-
-COPY vllm /opt/vllm
-RUN cd /opt/vllm && \
-    MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
-RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" model_hosting_container_standards anthropic
+# RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed"
 
 # Set the final working directory and default command
 WORKDIR /root/myCodeLab
