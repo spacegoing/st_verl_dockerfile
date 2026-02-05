@@ -30,31 +30,44 @@ RUN cd /opt/vllm && \
 RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed" model_hosting_container_standards anthropic
 
 # Other deps
-COPY mbridge /root/myCodeLab/mbridge/
-RUN cd /root/myCodeLab/mbridge/ && \
+COPY mbridge /root/myCodeLab/host/mbridge/
+RUN cd /root/myCodeLab/host/mbridge/ && \
     pip3 install --no-cache-dir --no-deps . && \
     cd .. && rm -rf mbridge
 
+# 1. Set Environment Variables (Grouped)
+ENV NLTK_DATA=/usr/local/share/nltk_data \
+    TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
+
+# 2. Copy small config files to a temp folder (Saves layers)
+COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
+
+# 3. Copy your local NLTK data (Make sure the folder 'nltk_data' is next to Dockerfile)
+COPY nltk_data /usr/local/share/nltk_data
+
+# 4. Copy Codebases
 COPY verl /root/myCodeLab/host/verl/
-RUN cd /root/myCodeLab/host/verl && \
-    # pip3 install -e .[vllm] && \
-    # pip3 install -e .[sglang] && \
+COPY MJ_NEMO_GYM /root/myCodeLab/host/mjnemogym/
+
+# 5. MEGA RUN: Installs everything in one single layer
+RUN \
+    # --- A. Setup Configs & Tiktoken (Move from temp) ---
+    mkdir -p /root/tiktoken_cache && \
+    mv /tmp/docker_context/o200k_base.tiktoken /root/tiktoken_cache/ && \
+    echo "" >> /root/.bashrc && \
+    cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
+    mv /tmp/docker_context/.tmux.conf /root/ && \
+    rm -rf /tmp/docker_context && \
+    # --- C. Install Verl ---
+    cd /root/myCodeLab/host/verl && \
     pip3 install --no-deps -e . && \
-    cd /root/myCodeLab/host/ && rm -rf verl
+    # --- D. Install MJ NemoGym ---
+    ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages && \
+    cd /root/myCodeLab/host/mjnemogym && \
+    pip3 install --no-cache-dir --upgrade-strategy "only-if-needed" -e .
 
-## Fragile Configs
-# vllm 0.12 uses openai harmony gpt oss encode
-RUN mkdir -p /root/tiktoken_cache
-COPY o200k_base.tiktoken /root/tiktoken_cache/o200k_base.tiktoken
-ENV TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
-
-# .bashrc alias
-COPY to_append.sh /tmp/to_append.sh
-RUN echo "" >> /root/.bashrc && \
-    cat /tmp/to_append.sh >> /root/.bashrc && \
-    rm /tmp/to_append.sh
-COPY .tmux.conf /root/.tmux.conf
-RUN ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
+WORKDIR /root/myCodeLab
+CMD ["/bin/bash"]
 
 # Missing deps
 # RUN pip install --no-cache-dir --upgrade-strategy "only-if-needed"
