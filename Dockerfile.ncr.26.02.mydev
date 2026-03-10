@@ -11,88 +11,81 @@ FROM nvcr.io/nvidia/nemo:26.02
 #   numpy=1.26.4  cuda-bindings=13.1.1  cuda-python=13.1.1
 #   apex=0.1  cupy-cuda12x=14.0.1  compressed-tensors=0.13.0
 # ============================================================
+# Base image has 107 layers. Legacy builder limit ~127.
+# We can add at most ~20 layers (RUN/COPY/ENV/WORKDIR/CMD each = 1).
+# ============================================================
 
-# 1. Set up workspace directories and symlinks
-RUN git config --global --add safe.directory '*'
-RUN mkdir -p /root/myCodeLab && \
+# Layer 1: Setup workspace + apt + wandb + pure-python pip deps (all merged)
+RUN git config --global --add safe.directory '*' && \
+    mkdir -p /root/myCodeLab && \
     ln -s /public /root/myCodeLab/public && \
-    ln -s /public/lichang93/stCodeLab /root/myCodeLab/host
+    ln -s /public/lichang93/stCodeLab /root/myCodeLab/host && \
+    apt-get update && apt-get install pdsh tmux htop vim -y && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir --no-deps wandb && \
+    wandb login df3cecbfc0874c8a352c40820becf4a15575614e && \
+    pip install --no-cache-dir --no-deps gpustat codetiming tensordict mathruler pylatexenc torchdata && \
+    pip install --no-cache-dir --no-deps hydra-core bitsandbytes && \
+    pip install --no-cache-dir --no-deps transformers==4.57.3 && \
+    pip install --no-cache-dir --no-deps model_hosting_container_standards anthropic
 
-# 2. Install your project's Python dependencies
-RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+# Layer 2: CUDA extensions (grouped_gemm, causal_conv1d, mamba_ssm)
+#   --no-build-isolation to use system torch (CUDA 13.0)
+RUN pip install --no-cache-dir --no-deps --no-build-isolation grouped_gemm && \
+    pip install --no-cache-dir --no-deps --no-build-isolation causal_conv1d && \
+    pip install --no-cache-dir --no-deps --no-build-isolation mamba_ssm
 
-# 3. Install wandb (not in 26.02 base) then log in
-RUN pip install --no-cache-dir --no-deps wandb
-RUN wandb login df3cecbfc0874c8a352c40820becf4a15575614e
-
-# 4. Install Dev Deps
-RUN apt-get update && apt-get install pdsh tmux htop vim -y
-
-RUN pip install --no-cache-dir --no-deps gpustat codetiming tensordict mathruler pylatexenc torchdata
-
-# 5. Packages removed from 26.02 that we need
-#    xformers: needs source build for torch 2.10, install from NVIDIA's build or skip
-#    hydra-core, grouped_gemm, bitsandbytes, mamba_ssm, causal_conv1d
-RUN pip install --no-cache-dir --no-deps hydra-core omegaconf
-RUN pip install --no-cache-dir --no-deps grouped_gemm bitsandbytes
-RUN pip install --no-cache-dir --no-deps causal_conv1d mamba_ssm
-
-# 6. Update transformers to 4.57.3 (26.02 ships 4.56.0)
-RUN pip install --no-cache-dir --no-deps transformers==4.57.3
-
-# 7. VLLM 0.12.0 — uninstall base vLLM 0.14.2 (no /opt/vllm in 26.02)
+# Layer 3: Uninstall base vLLM 0.14.2 + install setuptools_scm
 RUN pip uninstall -y vllm && \
     pip install setuptools_scm
-COPY vllm /opt/vllm
-RUN cd /opt/vllm && \
-    MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
-RUN pip install --no-cache-dir --no-deps model_hosting_container_standards anthropic
 
-# 8. Other deps
+# Layer 4: Copy vLLM source
+COPY vllm /opt/vllm
+
+# Layer 5: Build vLLM 0.12.0 (CUDA compilation, longest step)
+RUN cd /opt/vllm && \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
+
+# Layer 6: Copy mbridge + install + cleanup
 COPY mbridge /root/myCodeLab/host/mbridge/
 RUN cd /root/myCodeLab/host/mbridge/ && \
     pip3 install --no-cache-dir --no-deps . && \
     cd .. && rm -rf mbridge
 
-# 9. Set Environment Variables (Grouped)
+# Layer 7: ENV
 ENV NLTK_DATA=/usr/local/share/nltk_data \
     TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
 
-# 10. Copy small config files to a temp folder (Saves layers)
+# Layer 8-11: Copy files and codebases
 COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
-
-# 11. Copy your local NLTK data
 COPY nltk_data /usr/local/share/nltk_data
-
-# 12. Copy Codebases
 COPY verl /root/myCodeLab/host/verl/
 COPY MJ_NEMO_GYM /root/myCodeLab/host/mjnemogym/
 
-# 13. MEGA RUN: Installs everything in one single layer
-RUN \
-    # --- A. Setup Configs & Tiktoken (Move from temp) ---
-    mkdir -p /root/tiktoken_cache && \
+# Layer 12: MEGA RUN — configs + verl + mjnemogym
+RUN mkdir -p /root/tiktoken_cache && \
     mv /tmp/docker_context/o200k_base.tiktoken /root/tiktoken_cache/ && \
     echo "" >> /root/.bashrc && \
     cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
     mv /tmp/docker_context/.tmux.conf /root/ && \
     rm -rf /tmp/docker_context && \
-    # --- B. Install Verl ---
     cd /root/myCodeLab/host/verl && \
     pip3 install --no-deps -e . && \
-    # --- C. Install MJ NemoGym (--no-deps to protect base packages) ---
     ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages && \
     cd /root/myCodeLab/host/mjnemogym && \
     pip3 install --no-cache-dir --no-deps -e .
 
-# Set the final working directory and default command
+# Layer 13-14: Final
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
+
+# Total new layers: 14 (6 RUN + 4 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM-implicit)
+# 107 + 14 = 121, well under 127 limit
 
 # Missing deps (add here if runtime errors reveal missing packages)
 # RUN pip install --no-cache-dir --no-deps <package>
 
 # Build:
-# DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev --provenance=false --network host -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
+# DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev --network host -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
 # Run:
 # docker run --entrypoint /bin/bash -itd -v /mnt/public:/public --name vrl --network host registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev

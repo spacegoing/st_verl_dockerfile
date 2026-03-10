@@ -1,0 +1,98 @@
+# Docker Compose for 2-node B300 verl training cluster
+# Nodes: b31 (10.12.11.5, head) + b32 (10.12.11.6, worker)
+#
+# Usage:
+#   Head node (b31):  docker compose up -d head
+#   Worker node (b32): docker compose up -d worker
+#
+# NOTE: docker compose v5+ needed (b32 has it; b31 needs plugin install or use docker run directly)
+# Alternative for b31 (no compose plugin):
+#   docker run --entrypoint /bin/bash -itd --name vrl --network host --gpus all \
+#     --ipc=host --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
+#     --cap-add=IPC_LOCK -v /mnt/public:/public \
+#     registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+
+x-common: &common
+  image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+  entrypoint: /bin/bash
+  stdin_open: true
+  tty: true
+  network_mode: host
+  ipc: host
+  cap_add:
+    - IPC_LOCK
+    - SYS_PTRACE
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+    stack:
+      soft: 67108864
+      hard: 67108864
+  volumes:
+    - /mnt/public:/public
+  environment:
+    # Core
+    CUDA_DEVICE_MAX_CONNECTIONS: "1"
+    NCCL_NVLS_ENABLE: "1"
+    VLLM_USE_V1: "1"
+
+    # NCCL networking (B300 cluster: mlx5_10-17 are GPU-affine NICs)
+    NCCL_SOCKET_IFNAME: bond0
+    NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_14:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
+    NCCL_IB_GID_INDEX: "0"
+    NCCL_IB_TC: "138"
+    NCCL_IB_QPS_PER_CONNECTION: "8"
+    NCCL_MIN_NCHANNELS: "32"
+    NCCL_RUNTIME_CONNECT: "0"
+
+    # NVSHMEM / DeepEP
+    NVSHMEM_IBGDA_NIC_HANDLER: gpu
+    NVSHMEM_IB_TRAFFIC_CLASS: "138"
+    NVSHMEM_IB_ENABLE_IBGDA: "1"
+
+    # Transformer Engine
+    NVTE_FUSED_ATTN: "1"
+
+    # Ray
+    RAY_USAGE_STATS_ENABLED: "0"
+    RAY_ENABLE_OPENTELEMETRY: "0"
+    TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+
+    # wandb
+    WANDB_MODE: offline
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+  restart: unless-stopped
+
+services:
+  head:
+    <<: *common
+    container_name: vrl
+    hostname: b31
+    extra_hosts:
+      - "b31:10.12.11.5"
+      - "b32:10.12.11.6"
+    command: >
+      -c "ray start --head --port=6379 --dashboard-port=8265
+          --num-gpus=8 --num-cpus=64
+          --node-ip-address=10.12.11.5
+          && tail -f /dev/null"
+
+  worker:
+    <<: *common
+    container_name: vrl
+    hostname: b32
+    extra_hosts:
+      - "b31:10.12.11.5"
+      - "b32:10.12.11.6"
+    command: >
+      -c "ray start --address=10.12.11.5:6379
+          --num-gpus=8 --num-cpus=64
+          --node-ip-address=10.12.11.6
+          && tail -f /dev/null"
