@@ -1,8 +1,22 @@
-# FROM nvcr.io/nvidia/nemo:25.11.01
-FROM nvcr.io/nvidia/nemo:26.02
-
-# ============================================================
-# "DO NOT TOUCH" packages from 26.02 base image:
+# =============================================================================
+# Dockerfile: verl Moonlight Training on B300 (nemo:26.02 base)
+# =============================================================================
+# Design principles:
+#   1. Heavy compilation (vLLM, CUDA extensions) in early layers → cache friendly
+#   2. Frequently-changed code (verl, mjnemogym) in late layers → fast rebuilds
+#   3. All pip installs use --no-deps to protect base image packages
+#   4. No host path assumptions — mount point is set via docker-compose volumes
+#   5. Minimal layers (legacy builder limit: 127, base has ~107)
+#
+# Build (proxy ON for pip, proxy OFF for aliyuncs push):
+#   dvon  # enable docker proxy for build
+#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev \
+#     --network host \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
+#   dvoff  # disable proxy before push
+#   docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+#
+# "DO NOT TOUCH" packages from 26.02 base (protected by --no-deps):
 #   torch=2.10.0a0  torchvision=0.25.0a0  pytorch-triton=3.5.0
 #   flash_attn=2.7.4.post1+25.11  flashinfer=0.5.3
 #   transformer_engine=2.12.0  deep_ep=1.2.1  nvfuser=0.2.34
@@ -10,83 +24,74 @@ FROM nvcr.io/nvidia/nemo:26.02
 #   nvidia-modelopt=0.37.0  nvidia-resiliency-ext=0.4.1+cuda13
 #   numpy=1.26.4  cuda-bindings=13.1.1  cuda-python=13.1.1
 #   apex=0.1  cupy-cuda12x=14.0.1  compressed-tensors=0.13.0
-# ============================================================
-# Base image has 107 layers. Legacy builder limit ~127.
-# We can add at most ~20 layers (RUN/COPY/ENV/WORKDIR/CMD each = 1).
-# ============================================================
+# =============================================================================
+FROM nvcr.io/nvidia/nemo:26.02
 
-# Layer 1: Setup workspace + apt + wandb + pure-python pip deps (all merged)
-RUN git config --global --add safe.directory '*' && \
-    mkdir -p /root/myCodeLab && \
-    ln -s /public /root/myCodeLab/public && \
-    ln -s /public/lichang93/stCodeLab /root/myCodeLab/host && \
-    apt-get update && apt-get install pdsh tmux htop vim -y && \
-    rm -rf /var/lib/apt/lists/* && \
-    pip install --no-cache-dir --no-deps wandb && \
-    wandb login df3cecbfc0874c8a352c40820becf4a15575614e && \
-    pip install --no-cache-dir --no-deps gpustat codetiming tensordict mathruler pylatexenc torchdata && \
-    pip install --no-cache-dir --no-deps hydra-core bitsandbytes && \
-    pip install --no-cache-dir --no-deps transformers==4.57.3 && \
-    pip install --no-cache-dir --no-deps model_hosting_container_standards anthropic && \
-    pip install --no-cache-dir --no-deps pyvers math_verify latex2sympy2_extended openapi_schema_validator
+# ── Layer 1: vLLM swap (uninstall base 0.14.2, prep for custom 0.12.0) ──────
+RUN pip uninstall -y vllm && \
+    pip install --no-cache-dir setuptools_scm
 
-# Layer 2: CUDA extensions (grouped_gemm, causal_conv1d, mamba_ssm)
-#   --no-build-isolation to use system torch (CUDA 13.0)
+# ── Layer 2: Copy vLLM 0.12.0 source ────────────────────────────────────────
+COPY vllm /opt/vllm
+
+# ── Layer 3: Build vLLM 0.12.0 (CUDA compilation — slowest step, ~30min) ────
+RUN cd /opt/vllm && \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 \
+    pip install --no-deps --no-build-isolation --no-cache-dir -e .
+
+# ── Layer 4: CUDA extensions (need NVCC, second slowest) ─────────────────────
 RUN pip install --no-cache-dir --no-deps --no-build-isolation grouped_gemm && \
     pip install --no-cache-dir --no-deps --no-build-isolation causal_conv1d && \
     pip install --no-cache-dir --no-deps --no-build-isolation mamba_ssm
 
-# Layer 3: Uninstall base vLLM 0.14.2 + install setuptools_scm
-RUN pip uninstall -y vllm && \
-    pip install setuptools_scm
+# ── Layer 5: System packages + pure-python pip deps (rarely changes) ─────────
+RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
+    rm -rf /var/lib/apt/lists/* && \
+    git config --global --add safe.directory '*' && \
+    pip install --no-cache-dir --no-deps \
+        wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
+        hydra-core bitsandbytes orjson \
+        transformers==4.57.3 \
+        model_hosting_container_standards anthropic \
+        pyvers math_verify latex2sympy2_extended openapi_schema_validator && \
+    wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 
-# Layer 4: Copy vLLM source
-COPY vllm /opt/vllm
+# ── Layer 6: Copy + install mbridge (small, stable) ─────────────────────────
+COPY mbridge /tmp/mbridge
+RUN cd /tmp/mbridge && pip3 install --no-cache-dir --no-deps . && rm -rf /tmp/mbridge
 
-# Layer 5: Build vLLM 0.12.0 (CUDA compilation, longest step)
-RUN cd /opt/vllm && \
-    SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 pip install --no-deps --no-build-isolation --no-cache-dir -e .
+# ── Layer 7: Static config files ─────────────────────────────────────────────
+COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
+COPY nltk_data /usr/local/share/nltk_data
 
-# Layer 6: Copy mbridge + install + cleanup
-COPY mbridge /root/myCodeLab/host/mbridge/
-RUN cd /root/myCodeLab/host/mbridge/ && \
-    pip3 install --no-cache-dir --no-deps . && \
-    cd .. && rm -rf mbridge
-
-# Layer 7: ENV
+# ── Layer 8: ENV ──────────────────────────────────────────────────────────────
 ENV NLTK_DATA=/usr/local/share/nltk_data \
     TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
 
-# Layer 8-11: Copy files and codebases
-COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
-COPY nltk_data /usr/local/share/nltk_data
-COPY verl /root/myCodeLab/host/verl/
-COPY MJ_NEMO_GYM /root/myCodeLab/host/mjnemogym/
-
-# Layer 12: MEGA RUN — configs + verl + mjnemogym
-RUN mkdir -p /root/tiktoken_cache && \
+# ── Layer 9: Setup workspace + configs (no host path assumptions) ────────────
+#   /root/myCodeLab/host will be a mount point (set in docker-compose.yml)
+#   /root/myCodeLab/public will be a mount point (set in docker-compose.yml)
+RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache && \
     mv /tmp/docker_context/o200k_base.tiktoken /root/tiktoken_cache/ && \
     echo "" >> /root/.bashrc && \
     cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
     mv /tmp/docker_context/.tmux.conf /root/ && \
     rm -rf /tmp/docker_context && \
-    cd /root/myCodeLab/host/verl && \
-    pip3 install --no-deps -e . && \
-    ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages && \
-    cd /root/myCodeLab/host/mjnemogym && \
-    pip3 install --no-cache-dir --no-deps -e .
+    ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
 
-# Layer 13-14: Final
+# ── Layer 10-11: Copy codebases (LAST — these change most often) ─────────────
+COPY verl /root/myCodeLab/host/verl/
+COPY MJ_NEMO_GYM /root/myCodeLab/host/mjnemogym/
+
+# ── Layer 12: Install verl + mjnemogym (editable, uses COPY'd source) ────────
+#   At runtime, the mount overlays /root/myCodeLab/host/ so the editable
+#   install points to the mounted (live) source code.
+RUN cd /root/myCodeLab/host/verl && pip3 install --no-deps -e . && \
+    cd /root/myCodeLab/host/mjnemogym && pip3 install --no-cache-dir --no-deps -e .
+
+# ── Layer 13-14: Final ───────────────────────────────────────────────────────
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
 
-# Total new layers: 14 (6 RUN + 4 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM-implicit)
+# Total new layers: 14 (7 RUN + 3 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM)
 # 107 + 14 = 121, well under 127 limit
-
-# Missing deps (add here if runtime errors reveal missing packages)
-# RUN pip install --no-cache-dir --no-deps <package>
-
-# Build:
-# DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev --network host -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
-# Run:
-# docker run --entrypoint /bin/bash -itd -v /mnt/public:/public --name vrl --network host registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev

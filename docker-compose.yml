@@ -2,12 +2,17 @@
 # Nodes: b31 (10.12.11.5, head) + b32 (10.12.11.6, worker)
 #
 # Usage:
-#   Head node (b31):  docker compose up -d head
-#   Worker node (b32): docker compose up -d worker
+#   Head node (b31):   docker compose up -d head
+#   Worker node (b32): docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker
 #
-# NOTE: b31 has no compose plugin — install it first:
-#   sudo apt-get install docker-compose-plugin
-#   OR: mkdir -p ~/.docker/cli-plugins && curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose && chmod +x ~/.docker/cli-plugins/docker-compose
+# Mount design:
+#   /mnt/public              → /public              (full shared fs)
+#   /mnt/public/lichang93/st_verl_dockerfile → /root/myCodeLab/host  (project root = editable source)
+#   This eliminates all symlink workarounds. The Dockerfile creates
+#   /root/myCodeLab/host as an empty dir; the mount overlays it at runtime.
+#
+# Downloads (models, datasets) are at /mnt/public/lichang93/st_verl_dockerfile/downloads/
+#   Inside container: /root/myCodeLab/host/downloads/
 
 x-common: &common
   image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
@@ -26,7 +31,7 @@ x-common: &common
       hard: 67108864
   volumes:
     - /mnt/public:/public
-    - /dev/infiniband:/dev/infiniband
+    - /mnt/public/lichang93/st_verl_dockerfile:/root/myCodeLab/host
   environment:
     # Core
     CUDA_DEVICE_MAX_CONNECTIONS: "1"
