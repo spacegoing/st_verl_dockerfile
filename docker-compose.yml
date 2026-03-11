@@ -5,12 +5,9 @@
 #   Head node (b31):  docker compose up -d head
 #   Worker node (b32): docker compose up -d worker
 #
-# NOTE: docker compose v5+ needed (b32 has it; b31 needs plugin install or use docker run directly)
-# Alternative for b31 (no compose plugin):
-#   docker run --entrypoint /bin/bash -itd --name vrl --network host --gpus all \
-#     --ipc=host --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864 \
-#     --cap-add=IPC_LOCK -v /mnt/public:/public \
-#     registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+# NOTE: b31 has no compose plugin — install it first:
+#   sudo apt-get install docker-compose-plugin
+#   OR: mkdir -p ~/.docker/cli-plugins && curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose && chmod +x ~/.docker/cli-plugins/docker-compose
 
 x-common: &common
   image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
@@ -19,9 +16,7 @@ x-common: &common
   tty: true
   network_mode: host
   ipc: host
-  cap_add:
-    - IPC_LOCK
-    - SYS_PTRACE
+  privileged: true
   ulimits:
     memlock:
       soft: -1
@@ -31,16 +26,18 @@ x-common: &common
       hard: 67108864
   volumes:
     - /mnt/public:/public
+    - /dev/infiniband:/dev/infiniband
   environment:
     # Core
     CUDA_DEVICE_MAX_CONNECTIONS: "1"
     NCCL_NVLS_ENABLE: "1"
     VLLM_USE_V1: "1"
+    VLLM_ATTENTION_BACKEND: "CUTLASS_MLA"
 
-    # NCCL networking (B300 cluster: mlx5_10-17 are GPU-affine NICs)
+    # NCCL networking (B300 cluster: mlx5_10-17 are GPU-affine RoCE NICs)
     NCCL_SOCKET_IFNAME: bond0
     NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_14:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
-    NCCL_IB_GID_INDEX: "0"
+    NCCL_IB_GID_INDEX: "3"
     NCCL_IB_TC: "138"
     NCCL_IB_QPS_PER_CONNECTION: "8"
     NCCL_MIN_NCHANNELS: "32"
@@ -78,11 +75,13 @@ services:
     extra_hosts:
       - "b31:10.12.11.5"
       - "b32:10.12.11.6"
-    command: >
-      -c "ray start --head --port=6379 --dashboard-port=8265
-          --num-gpus=8 --num-cpus=64
-          --node-ip-address=10.12.11.5
-          && tail -f /dev/null"
+    command:
+      - -c
+      - >-
+        ray start --head --port=6379 --dashboard-port=8265
+        --num-gpus=8 --num-cpus=64
+        --node-ip-address=10.12.11.5
+        && tail -f /dev/null
 
   worker:
     <<: *common
@@ -91,8 +90,10 @@ services:
     extra_hosts:
       - "b31:10.12.11.5"
       - "b32:10.12.11.6"
-    command: >
-      -c "ray start --address=10.12.11.5:6379
-          --num-gpus=8 --num-cpus=64
-          --node-ip-address=10.12.11.6
-          && tail -f /dev/null"
+    command:
+      - -c
+      - >-
+        ray start --address=10.12.11.5:6379
+        --num-gpus=8 --num-cpus=64
+        --node-ip-address=10.12.11.6
+        && tail -f /dev/null
