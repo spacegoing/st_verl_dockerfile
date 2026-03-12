@@ -155,6 +155,9 @@ Total: 122 layers (107 base + 15 new), well under 127 limit.
 | 19 | 03-12 | build | `ModuleNotFoundError: No module named 'lcb_integration'` | Gym's `compute_code_generation_metrics.py` uses bare `from lcb_integration.X` imports that fail when imported as namespace package | Changed to relative imports (`from .pass_k_utils`, `from .testing_util`, `from .lm_styles`) in 3 files |
 | 20 | 03-12 | build | `verl_compute_score` raises KeyError for `math_dapo` data_source | Adapter only had `nemogym_*` keys; existing DAPO datasets use `math_dapo` | Added fallback to `default_compute_score` for non-nemogym data sources |
 | 21 | 03-12 | runtime | Ray job submit `ServerDisconnectedError` | Container started Ray with wrong `--node-ip-address=10.12.11.5` (b31) on b32; proxy intercepting Ray dashboard requests | Started container manually with correct IP and cleared proxy env vars |
+| 22 | 03-12 | runtime | `HFValidationError: Repo id must be in form 'repo_name'` on model path | `st_verl_dockerfile/downloads/` dir shadows the bind mount `/mnt/public/lichang93/downloads → /root/myCodeLab/host/downloads`, so model files not visible in container | `cp -rs` to create symlinks from `/public/lichang93/downloads/` into the shadowed path |
+| 23 | 03-12 | runtime | `RuntimeError: Sizes of tensors must match...Expected 1024 got 1873` | Blend val data has prompts > 1024 tokens (structured/code domains); `max_prompt_length=1024` too small | Increased `max_prompt_length` to 4096 in blend smoke script |
+| 24 | 03-12 | runtime | `'list' object has no attribute 'strip'` in IF scoring | Non-fatal: IF instruction count handler receives list instead of string for some verifier_metadata fields | Logged and returns 0.0; won't block training |
 
 ---
 
@@ -171,11 +174,12 @@ Total: 122 layers (107 base + 15 new), well under 127 limit.
 | Dockerfile: replace MJ_NEMO_GYM with Gym | Done |
 | Dockerfile: add verifiable-instructions | Done |
 | Dockerfile: add langdetect/absl-py/immutabledict to L5 | Done |
-| Download Nemotron blend dataset | Pending |
-| Preprocess sample data | Pending |
+| Download Nemotron blend dataset | Done (71k train, 100 val; 5 domains, no math) |
+| Preprocess sample data | Done (`preprocess_nemogym_blend_v5.py`) |
 | Build image | Done |
 | Fix Gym lcb_integration imports (relative) | Done |
 | Add fallback to default_compute_score | Done |
 | Test: verify scoring with Gym | Done (import + unit test passed) |
-| Test: end-to-end training (smoke) | Done (val + step 1 completed) |
+| Test: end-to-end DAPO math smoke | Done (val + step 1 completed) |
+| Test: end-to-end blend smoke (5 domains) | Done (val + step 1 completed, all 5 domains scored) |
 | Final dep diff report | Pending |
