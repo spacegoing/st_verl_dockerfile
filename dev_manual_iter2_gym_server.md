@@ -48,7 +48,7 @@ The reference pattern is `GoogleSearchRewardManager` in `verl/examples/tutorial/
 }
 ```
 
-**Multi-domain difference from reference**: GoogleSearch uses a single server URL. Our blend has 5 domains, each with its own server. The reward manager needs a `{data_source: server_url}` routing map.
+**Multi-domain difference from reference**: GoogleSearch uses a single server URL. Our blend has 6 domains, each with its own server. The reward manager needs a `{data_source: server_url}` routing map.
 
 ### Gym Side (Resource Servers)
 
@@ -61,6 +61,7 @@ Each domain's `/verify` endpoint expects a Pydantic model extending `BaseVerifyR
 | instruction_following | `id`, `instruction_id_list`, `prompt`, `kwargs`, `grading_mode` | `reward: 0.0/1.0`, `follow_instruction_list` |
 | structured_outputs | `schema_str`, `schema_type` | `reward: 0.0/1.0` |
 | workplace_assistant | `ground_truth`, `id`, `category`, `environment_name` | `reward: 0.0/1.0` |
+| math_with_judge | `question`, `expected_answer` | `reward: 0.0/1.0` (library-only, no LLM judge) |
 
 **NeMoGymResponse format**: The servers extract model output text from `response.output[-1].content[0].text` (for message items) or from function_call items (for workplace). The `responses_create_params` field is required by Pydantic but only echoed — not used in scoring logic.
 
@@ -82,7 +83,8 @@ Each row has different keys per domain. Common field: `agent_ref.name` → deter
 
 5 columns: `data_source`, `prompt`, `reward_model`, `ability`, `extra_info` (JSON string)
 
-Distributions (val): nemogym_mcqa=27, nemogym_code=26, nemogym_if=26, nemogym_workplace=14, nemogym_structured=7
+Distributions (train_v2): nemogym_math=22056, nemogym_mcqa=19670, nemogym_code=19169, nemogym_if=16575, nemogym_workplace=10229, nemogym_structured=5545 (total: 93244)
+Distributions (val): nemogym_mcqa=27, nemogym_code=26, nemogym_if=26, nemogym_workplace=14, nemogym_structured=7 (no math yet)
 
 ---
 
@@ -99,6 +101,7 @@ mcqa:                   port 19002
 instruction_following:  port 19003
 structured_outputs:     port 19004
 workplace_assistant:    port 19005
+math_with_judge:        port 19006
 ```
 
 Approach: Start each server directly with `python -m uvicorn` using the Gym server's FastAPI app.
@@ -213,12 +216,33 @@ Or simpler: use `SimpleServer.run_webserver()` with env-based config.
 
 ---
 
-## Data Pipeline (No Changes)
+## Data Pipeline
 
 Existing preprocessor and parquet format work for iter2:
 - `extra_info` already contains all domain-specific fields needed for `/verify`
 - `data_source` maps to the correct server
 - `prompt` is already normalized for verl's chat format
+
+**Math domain patching**: The raw blend JSONL uses `_hf_placeholder` for math rows (DAPO-Math-17k and Skywork-OR1-RL-Data). These contain row indices into HF datasets instead of inline data. Must run `create_nanov3_jsonl.py` (or `patch_blend_local.py` for offline) to resolve placeholders before preprocessing.
+
+**Pipeline**: `train.jsonl` → `patch_blend_local.py` → `train_patched.jsonl` → `preprocess_nemogym_blend_v5.py` → `train_v2.parquet`
+
+## Bug Log
+
+### Bug: NeMoGymResponse output format
+Plain `{"role": "assistant", "content": "..."}` in the `response.output` list causes reward=0.0. Gym servers expect proper `NeMoGymResponseOutputMessage` format:
+```json
+{"type": "message", "id": "msg_0", "role": "assistant", "status": "completed",
+ "content": [{"type": "output_text", "text": "model_output", "annotations": []}]}
+```
+**Fix**: Updated `_build_verify_body()` in `nemogym_server.py` to use proper format.
+
+### Bug: code_gen bare imports (same as iter1 #19)
+`from lcb_integration.*` fails. Must use `from resources_servers.code_gen.lcb_integration.*`.
+
+### Bug: Gym profiling.py module-level imports
+Gym's `profiling.py` imports `yappi`, `gprof2dot`, `pydot` at module level. These aren't in the base image.
+**Fix**: Added to Dockerfile L5.
 
 ---
 
@@ -270,5 +294,11 @@ Existing preprocessor and parquet format work for iter2:
 | Update run script: nemogym_server + server_urls | Done |
 | Test: all 5 server instantiation | Done |
 | Test: verify endpoint per domain (mcqa, if, so, wa, code) | Done (all return correct rewards) |
+| Add math_with_judge domain (port 19006) | Done |
+| Download Skywork-OR1-RL-Data math split | Done |
+| Patch train.jsonl with HF math data (create_nanov3_jsonl.py) | Done (22056 rows, 0 errors) |
+| Re-preprocess to train_v2.parquet (all 6 domains, 93244 rows) | Done |
+| Update run script to use train_v2.parquet | Done |
 | Build image | Pending |
+| Test: math_with_judge server verify endpoint | Done (correct=1.0, wrong=0.0) |
 | Test: end-to-end blend smoke | Pending |
