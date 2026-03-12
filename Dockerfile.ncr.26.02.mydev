@@ -54,7 +54,8 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
         transformers==4.57.3 \
         model_hosting_container_standards anthropic \
         pyvers math_verify latex2sympy2_extended openapi_schema_validator \
-        langdetect absl-py immutabledict && \
+        langdetect absl-py immutabledict \
+        yappi itsdangerous gprof2dot pydot && \
     wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 
 # ── Layer 6: Copy + install mbridge (small, stable) ─────────────────────────
@@ -86,8 +87,10 @@ COPY Gym /root/myCodeLab/host/Gym/
 COPY verifiable-instructions /tmp/verifiable-instructions/
 
 # ── Layer 13: Install verl + Gym + verifiable-instructions ───────────────────
-#   Gym installed with --no-deps to avoid pulling server infra deps.
-#   We only use Gym's scoring functions (resources_servers.*).
+#   Gym installed with --no-deps to avoid pulling unwanted deps (mlflow etc).
+#   Server infra deps (fastapi, uvicorn, aiohttp, ray, yappi, itsdangerous)
+#   are already in the base image or added to L5 above.
+#   Gym resource servers run locally as FastAPI services for reward verification.
 #   verifiable-instructions is a Gym dependency for instruction_following domain.
 #   At runtime, the mount overlays /root/myCodeLab/host/ so editable installs
 #   point to the mounted (live) source code.
