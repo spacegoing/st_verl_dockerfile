@@ -160,10 +160,15 @@ ln -sf /mnt/public/lichang93/stCodeLab/downloads /mnt/public/lichang93/st_verl_d
 | docker-compose.yml mount path fix (no stCodeLab indirection) | Done |
 | dev_manual.md updated | Done |
 | Downloads symlink on host fs | Done |
-| Image rebuild | Pending |
-| Push to Aliyun registry | Pending |
-| Pull on b32 | Pending |
-| Verification | Pending |
+| Image rebuild | Done (88e453cd896f, b32) |
+| Push to Aliyun registry | Pending (need `dvoff` first) |
+| Dockerfile fix: `mjnemogym/` → `MJ_NEMO_GYM/` | Done |
+| Dockerfile fix: `--no-build-isolation` for editable installs | Done |
+| docker-compose: added downloads mount | Done |
+| Removed stale stCodeLab symlink | Done |
+| Smoke test: imports, model load, vLLM CUTLASS_MLA init | PASS |
+| Smoke test: training step | PASS (reward manager `data_source` mismatch — verl code issue, not image) |
+| Note: `enforce_eager=True` needed (torch.compile shape bug on B300) | Bug #18 |
 
 ---
 

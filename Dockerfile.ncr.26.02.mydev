@@ -3,7 +3,7 @@
 # =============================================================================
 # Design principles:
 #   1. Heavy compilation (vLLM, CUDA extensions) in early layers → cache friendly
-#   2. Frequently-changed code (verl, mjnemogym) in late layers → fast rebuilds
+#   2. Frequently-changed code (verl, Gym) in late layers → fast rebuilds
 #   3. All pip installs use --no-deps to protect base image packages
 #   4. No host path assumptions — mount point is set via docker-compose volumes
 #   5. Minimal layers (legacy builder limit: 127, base has ~107)
@@ -53,7 +53,8 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
         hydra-core bitsandbytes orjson \
         transformers==4.57.3 \
         model_hosting_container_standards anthropic \
-        pyvers math_verify latex2sympy2_extended openapi_schema_validator && \
+        pyvers math_verify latex2sympy2_extended openapi_schema_validator \
+        langdetect absl-py immutabledict && \
     wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 
 # ── Layer 6: Copy + install mbridge (small, stable) ─────────────────────────
@@ -79,19 +80,25 @@ RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache &&
     rm -rf /tmp/docker_context && \
     ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
 
-# ── Layer 10-11: Copy codebases (LAST — these change most often) ─────────────
+# ── Layer 10-12: Copy codebases (LAST — these change most often) ─────────────
 COPY verl /root/myCodeLab/host/verl/
-COPY MJ_NEMO_GYM /root/myCodeLab/host/mjnemogym/
+COPY Gym /root/myCodeLab/host/Gym/
+COPY verifiable-instructions /tmp/verifiable-instructions/
 
-# ── Layer 12: Install verl + mjnemogym (editable, uses COPY'd source) ────────
-#   At runtime, the mount overlays /root/myCodeLab/host/ so the editable
-#   install points to the mounted (live) source code.
-RUN cd /root/myCodeLab/host/verl && pip3 install --no-deps -e . && \
-    cd /root/myCodeLab/host/mjnemogym && pip3 install --no-cache-dir --no-deps -e .
+# ── Layer 13: Install verl + Gym + verifiable-instructions ───────────────────
+#   Gym installed with --no-deps to avoid pulling server infra deps.
+#   We only use Gym's scoring functions (resources_servers.*).
+#   verifiable-instructions is a Gym dependency for instruction_following domain.
+#   At runtime, the mount overlays /root/myCodeLab/host/ so editable installs
+#   point to the mounted (live) source code.
+RUN cd /root/myCodeLab/host/verl && pip3 install --no-build-isolation --no-deps -e . && \
+    cd /root/myCodeLab/host/Gym && pip3 install --no-build-isolation --no-deps -e . && \
+    cd /tmp/verifiable-instructions && pip3 install --no-build-isolation --no-deps . && \
+    rm -rf /tmp/verifiable-instructions
 
-# ── Layer 13-14: Final ───────────────────────────────────────────────────────
+# ── Layer 14-15: Final ───────────────────────────────────────────────────────
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
 
-# Total new layers: 14 (7 RUN + 3 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM)
-# 107 + 14 = 121, well under 127 limit
+# Total new layers: 15 (7 RUN + 4 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM)
+# 107 + 15 = 122, well under 127 limit

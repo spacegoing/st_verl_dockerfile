@@ -32,6 +32,7 @@ x-common: &common
   volumes:
     - /mnt/public:/public
     - /mnt/public/lichang93/st_verl_dockerfile:/root/myCodeLab/host
+    - /mnt/public/lichang93/downloads:/root/myCodeLab/host/downloads
   environment:
     # Core
     CUDA_DEVICE_MAX_CONNECTIONS: "1"
