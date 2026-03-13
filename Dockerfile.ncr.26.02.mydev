@@ -63,7 +63,9 @@ RUN uv pip install --no-cache --no-deps --no-build-isolation grouped_gemm && \
 #   apt-get: system tools unrelated to Python packaging
 #   uv pip install --no-deps: installs to /opt/venv/ (HIGH priority)
 #   transformers: pinned to match what verl expects (overrides venv's 4.57.6)
-#   wandb: our version (overrides venv's 0.24.0)
+#   Gym-only packages (math_verify, langdetect, openapi_schema_validator, etc.)
+#   removed from here — they install into Gym's isolated .venv via ng_run
+#   (see plans/nemo_gym_worker/design_manual.md §4-5, README §141-178).
 RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*' && \
@@ -71,9 +73,7 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
         wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
         hydra-core bitsandbytes orjson \
         transformers==4.57.3 \
-        model_hosting_container_standards anthropic \
-        pyvers math_verify latex2sympy2_extended openapi_schema_validator \
-        langdetect absl-py immutabledict \
+        pyvers \
         yappi itsdangerous gprof2dot pydot && \
     wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 
@@ -101,28 +101,52 @@ RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache &&
     rm -rf /tmp/docker_context && \
     ln -s /opt/venv/lib/python3.12/site-packages /root/myCodeLab/site-packages
 
-# ── Layer 10-12: Copy codebases (LAST — these change most often) ─────────────
+# ── Layer 10-11: Copy codebases (LAST — these change most often) ─────────────
+#   verifiable-instructions no longer COPYed — Gym lc_fix branch pulls it
+#   from git+https://github.com/spacegoing/my_verifiable-instructions.git
+#   (see plan_uv_gym_integration.md, instruction_following/requirements.txt).
 COPY verl /root/myCodeLab/host/verl/
 COPY Gym /root/myCodeLab/host/Gym/
-COPY verifiable-instructions /tmp/verifiable-instructions/
 
-# ── Layer 13: Install verl + Gym + verifiable-instructions ───────────────────
-#   Editable installs use .pth files → always resolve before site-packages,
-#   so they work regardless of pip/uv split.
-#   Gym: --no-deps avoids pulling unwanted deps (mlflow etc).
-#   Server infra deps (fastapi, uvicorn, aiohttp, ray, yappi, itsdangerous)
-#   are already in the base image or added in L5.
-#   verifiable-instructions: Gym dependency for instruction_following domain.
-#   At runtime, mount overlays /root/myCodeLab/host/ so editable installs
-#   point to the mounted (live) source code.
-RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e . && \
-    cd /root/myCodeLab/host/Gym && uv pip install --no-build-isolation --no-deps -e . && \
-    cd /tmp/verifiable-instructions && uv pip install --no-build-isolation --no-deps . && \
-    rm -rf /tmp/verifiable-instructions
+# ── Layer 12: Install verl (editable, into /opt/venv/) ───────────────────────
+#   verl stays in the system venv for training loop access.
+RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e .
+
+# ── Layer 13: Gym isolated venv + ng_run per-server venvs ────────────────────
+#   Architecture (design_manual.md §3-5, README Dockerfile Guide §141-178):
+#     1. Upgrade uv: Gym requires >=0.9.30, base has 0.7.2
+#        (plan_uv_gym_integration.md). Installed to ~/.local/bin/.
+#     2. Gym main .venv: isolated from /opt/venv/, holds Gym + deps
+#        .[dev] installs core Gym; extra packages for domain verifiers.
+#     3. ng_run "+dry_run=true": creates 7 per-server venvs with proper
+#        isolation (~5 min on overlay disk). At runtime, skip_venv_if_present=true
+#        → instant startup (design_manual.md §4).
+#     4. env.yaml: satisfies ${policy_base_url} etc. interpolation for
+#        policy_model placeholder (gym_env.yaml, design_manual.md §8).
+#     5. lcb_integration symlink: code_gen @ray.remote workers spawn on
+#        system Python, need lcb_integration importable (README §167-169).
+#   lc_fix branch: verifiable-instructions pulled from git by ng_run
+#   (no local COPY needed — see plan_uv_gym_integration.md).
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cd /root/myCodeLab/host/Gym && \
+    mkdir -p cache && \
+    /root/.local/bin/uv venv --python 3.12 .venv && \
+    /root/.local/bin/uv pip install -e ".[dev]" --python .venv/bin/python && \
+    /root/.local/bin/uv pip install \
+        langdetect openapi_schema_validator math_verify \
+        absl-py nltk immutabledict \
+        --python .venv/bin/python && \
+    cp /root/myCodeLab/host/verl/my_scripts/gym_env.yaml \
+       /root/myCodeLab/host/Gym/env.yaml && \
+    .venv/bin/ng_run \
+        "+config_paths=[/root/myCodeLab/host/verl/my_scripts/gym_blend_servers.yaml]" \
+        "+dry_run=true" && \
+    ln -sf /root/myCodeLab/host/Gym/resources_servers/code_gen/lcb_integration \
+        /usr/local/lib/python3.12/dist-packages/lcb_integration
 
 # ── Layer 14-15: Final ───────────────────────────────────────────────────────
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
 
-# Total new layers: 15 (7 RUN + 4 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM)
+# Total new layers: 15 (8 RUN + 3 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM)
 # 107 + 15 = 122, well under 127 limit

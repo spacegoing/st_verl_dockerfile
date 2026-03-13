@@ -1,0 +1,43 @@
+# Docker build context exclusions — reduce from ~8GB to ~100MB
+# The COPY directives only need source code, not caches/data/docs
+
+# Git
+**/.git
+
+# Python caches
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+
+# Gym: exclude per-server venvs (3.6GB), caches (1.5GB), and non-essential dirs
+# The resource_servers/ Python code is needed, but each server's .venv/ is not
+# (we install Gym as editable with --no-deps, base image has all needed deps)
+Gym/cache/
+Gym/docs/
+Gym/tests/
+Gym/outputs/
+Gym/benchmarks/
+Gym/results/
+Gym/data/
+Gym/.venv
+Gym/resources_servers/**/.venv
+
+# vLLM: already cleaned (.git, .deps, tests removed), but just in case
+vllm/.git
+vllm/tests
+vllm/docs
+vllm/benchmarks
+vllm/examples
+vllm/.deps
+
+# No longer COPYed — Gym lc_fix pulls from git
+verifiable-instructions/
+
+# Project files not needed in image
+legacy/
+downloads/
+docs/
+*.md
+.gitignore
+docker-compose.yml

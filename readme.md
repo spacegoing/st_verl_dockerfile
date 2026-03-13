@@ -14,10 +14,12 @@ st_verl_dockerfile/
   readme.md                     # This file
   dev_manual_iter2_gym_server.md  # Iter2 Gym server integration plan, bug log, changelog
   image_deps_report_v2.md       # Exhaustive 3-image dependency diff
-  .gitignore / .tmux.conf / to_append.sh / o200k_base.tiktoken  # Static configs
+  dev_notes.md                  # Detailed changelog (pip→uv migration, build results, etc.)
+  .gitignore / .dockerignore / .tmux.conf / to_append.sh / o200k_base.tiktoken  # Static configs
   docs/
     reward_callstack_analysis.md  # verl reward manager callstack analysis
     pip_vs_uv_investigation.md   # Why 26.02 has dual pip/uv, package shadowing analysis
+    nemo_2602_image_anatomy.md   # 303-layer build phase analysis of nemo:26.02
   verl/                         # verl source (editable install)
     my_scripts/                 # Training launch scripts, Gym server launcher
   Gym/                          # NemoGym source (editable install, iter2)
@@ -417,6 +419,8 @@ dvon / dvoff   # Docker daemon proxy (restarts docker!)
 
 - `dev_manual_iter2_gym_server.md` — Iter2 migration plan, implementation details, bug log
 - `image_deps_report_v2.md` — Exhaustive 3-image dependency diff (25.11.01 vs 26.02 vs myverl)
+- `dev_notes.md` — Detailed changelog: pip→uv migration, build results, all changes with rationale
 - `docs/pip_vs_uv_investigation.md` — pip vs uv dual-layer analysis, package shadowing
+- `docs/nemo_2602_image_anatomy.md` — 303-layer build phase analysis (what NeMo adds vs PyTorch base)
 - `docs/reward_callstack_analysis.md` — verl reward manager callstack analysis
 - `legacy/` — Old Dockerfiles, iter1 docs, MJ_NEMO_GYM, verl.old, inspection scripts
