@@ -51,9 +51,186 @@ with `--no-deps`.
 4. **Gym-only packages removed from L5** — 9 packages moved from system venv to Gym venv. These are only needed by Gym's domain verifiers, not by verl training loop.
 5. **verl install separated** — L12 installs verl editable into `/opt/venv/` (needed for training loop). L13 handles all Gym setup. Clean separation.
 
-### Build Result
+### Bugs & Fixes — Complete List
 
-*(updated after build completes)*
+All bugs encountered during the ng_run Gym integration, ordered chronologically.
+
+#### Build-Time Bugs (Dockerfile)
+
+**Bug 1: `egg_base` directory missing** (build attempt 1)
+```
+error: error in 'egg_base' option: 'cache' does not exist or is not a directory
+```
+- **Cause**: Gym's `pyproject.toml` line 299: `egg_base = "cache"`. But `.dockerignore` excluded `Gym/cache/`.
+- **Fix**: Added `mkdir -p cache` before `uv pip install -e ".[dev]"` in L13.
+- **Reference**: `.dockerignore` still excludes `Gym/cache/` to save context size; we create an empty one in-image.
+
+**Bug 2: `responses_api_models/vllm_model` missing** (build attempt 2)
+```
+RuntimeError: Missing pyproject.toml or requirements.txt for uv venv setup in server dir:
+  /root/myCodeLab/host/Gym/responses_api_models/vllm_model
+```
+- **Cause**: `.dockerignore` had `Gym/responses_api_models/` which excluded the entire directory. ng_run's `policy_model` config (gym_blend_servers.yaml line 9-16) references `responses_api_models/vllm_model/` which needs its `pyproject.toml`.
+- **Fix**: Removed `Gym/responses_api_models/` from `.dockerignore`.
+
+**Bug 3: `pyvers` module not found** (build attempt 3 — image built, runtime verification failed)
+```
+ModuleNotFoundError: No module named 'pyvers'
+```
+- **Cause**: Incorrectly removed `pyvers` from L5, thinking it was Gym-only. But `tensordict/utils.py` imports `from pyvers import get_backend, ...` — it's a verl training dependency, not Gym.
+- **Fix**: Added `pyvers` back to L5 install list.
+- **Lesson**: Only remove packages you're certain are Gym-only. `pyvers` is used by `tensordict`, which is a core verl dependency.
+
+#### Runtime Bugs (start_gym_uv.sh / container)
+
+**Bug 4: "No available ports" — Gym Ray worker port range too small**
+```
+Invalid: No available ports. Please specify a wider port range using
+--min-worker-port and --max-worker-port
+```
+- **Cause**: `--max-worker-port=7499` gave only 100 ports (7400-7499). ng_run spawns multiple worker processes per server, and with 7 servers the 100-port pool was exhausted.
+- **Fix**: Changed `--max-worker-port` from 7499 to 7999 (600 ports).
+- **Files changed**: `start_gym_uv.sh`, `plans/nemo_gym_worker/scripts/start_gym.sh`
+
+**Bug 5: "Too many open files" — raylet crash (SIGABRT)**
+```
+Unhandled exception: open: Too many open files
+```
+- **Cause**: `--num-cpus=256` caused Ray to pre-create file descriptors proportional to CPU count, exceeding the container's default `ulimit -n 1024`.
+- **Fix (two-part)**:
+  1. Reduced `--num-cpus` from 256 to 32 in `start_gym_uv.sh`
+  2. Added `nofile: soft: 65536, hard: 65536` to `docker-compose.yml` ulimits
+- **Also removed**: `--memory=$((3900 * 1024 * 1024 * 1024))` (unnecessary, let Ray auto-detect)
+- **Files changed**: `start_gym_uv.sh`, `plans/nemo_gym_worker/scripts/start_gym.sh`, `docker-compose.yml`
+
+**Bug 6: Ray version mismatch — per-server venvs vs Gym main .venv**
+```
+RuntimeError: Version mismatch: The cluster was started with: Ray: 2.52.1 ...
+This process on node was started with: Ray: 2.54.0
+```
+- **Cause**: The local per-server venvs (on host filesystem, visible via mount overlay) were built at a different time and had Ray 2.54.0, while the Gym main `.venv` (from Docker image) had Ray 2.52.1. When `skip_venv_if_present=true`, ng_run uses whatever venvs exist, and the mount overlay makes host venvs visible.
+- **Fix**: Extracted correct per-server venvs from Docker image via `docker cp` to local filesystem, so the mount overlay exposes venvs matching the image's Ray version.
+- **Root cause**: Docker-compose mount overlay hides image venvs; local stale venvs take precedence.
+
+**Bug 7: Stale Ray GCS session assertion**
+```
+AssertionError: Session name session_2026-03-13_14-19-16_... does not match
+persisted value b'session_2026-03-13_14-11-02_...'
+```
+- **Cause**: Leftover GCS server processes from previous failed `ray start` attempts. The old GCS still held the session in `/tmp/ray_gym/`, so new `ray start --head` failed session assertion.
+- **Fix**: Kill stale GCS processes (`pkill -9 -f gcs_server`) and `rm -rf /tmp/ray_gym`. Ultimately fixed by recreating the container fresh.
+- **Lesson**: After repeated Ray start/stop in the same container, stale state accumulates. Recreating the container is the cleanest fix.
+
+**Bug 8: Ports already in use (TIME_WAIT)**
+```
+[Errno 98] error while attempting to bind on address ('127.0.0.1', 20001):
+address already in use
+```
+- **Cause**: TCP ports in TIME_WAIT state from rapid start/stop cycles of Gym servers.
+- **Fix**: Wait for TIME_WAIT expiry (~60s) or recreate container. No code change needed.
+
+**Bug 9: Health check always failing — `curl -sf` on `/health` returns 404**
+```
+(code_gen) INFO: 127.0.0.1:... - "GET /health HTTP/1.1" 404 Not Found
+[init] ERROR: Not all servers healthy after 120s
+```
+- **Cause**: `start_gym_uv.sh` used `curl -sf "http://localhost:${port}/health"`. The `-f` flag treats HTTP 4xx as failures. But Gym servers have NO `/health` endpoint — they use GET `/` which returns 404, and Gym's own `poll_for_status()` only checks TCP connectivity (not HTTP status code). See `Gym/nemo_gym/server_utils.py:304-312`.
+- **Fix**: Changed to `curl -s --connect-timeout 2 "http://localhost:${port}/"` — checks connectivity only, matches Gym's own health check behavior.
+- **Files changed**: `start_gym_uv.sh`, `plans/nemo_gym_worker/scripts/start_gym.sh`
+
+**Bug 10: Docker push authorization failed**
+```
+push access denied, repository does not exist or may require authorization:
+server message: insufficient_scope: authorization failed
+```
+- **Cause**: Registry credentials expired or `dvoff` didn't properly disable proxy before push.
+- **Status**: Not a code bug. User needs to re-authenticate with Aliyun registry.
+
+**Bug 11: Training script `--wait` flag not handled**
+```
+# run_moonlight_1node_blend_smoke.sh line 10 had:
+bash "${SCRIPT_DIR}/start_gym_uv.sh" --wait
+```
+- **Cause**: `start_gym_uv.sh` only handles `--status` and `--stop`. The `--wait` flag was passed as `$1` which then got used as TIMEOUT value (line 102: `TIMEOUT="${1:-120}"`), causing `--wait` to be treated as a non-numeric timeout.
+- **Fix**: Removed `--wait` from the training script. Default behavior already starts + waits for health.
+
+### Build Result (Image ID: e79627581af2)
+
+Build 4 succeeded. L1-L4 cached (vLLM+CUDA), L5-L13 rebuilt.
+
+Image size: 68.5GB (content size 5.02GB delta).
+
+**Verification results:**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| verl import | OK | 0.8.0.dev, editable at `/root/myCodeLab/host/verl/` |
+| tensordict | OK | 0.11.0, pyvers dependency resolved |
+| transformers | OK | 4.57.3 (pin effective) |
+| Gym .venv | OK | isolated at `/root/myCodeLab/host/Gym/.venv/`, nemo_gym 0.3.0rc0 |
+| Gym domain deps | OK | math_verify, langdetect, openapi_schema_validator all importable in Gym .venv |
+| Per-server venvs | OK | All 6: code_gen, mcqa, instruction_following, structured_outputs, workplace_assistant, math_with_judge |
+| lcb_integration | OK | Symlinked to `/usr/local/lib/python3.12/dist-packages/lcb_integration` |
+| Gym isolation | OK | `import nemo_gym` fails from system Python (not in /opt/venv/) |
+| env.yaml | OK | Policy model placeholder in `/root/myCodeLab/host/Gym/env.yaml` |
+| uv (upgraded) | OK | 0.10.9 at `~/.local/bin/uv` (base's 0.7.2 used for L1-L5) |
+
+**.dockerignore updates:**
+- Added `Gym/.venv` — exclude host's main Gym venv from build context
+- Added `verifiable-instructions/` — no longer COPYed (lc_fix pulls from git)
+- Removed `Gym/responses_api_models/` — needed by ng_run for policy_model config
+- Kept `Gym/cache/` — created fresh in Dockerfile (avoids host cache bloat)
+
+### Runtime Changes
+
+**start_gym_uv.sh fixes (Bugs 4, 5, 9):**
+- `--max-worker-port`: 7499 → 7999 (100 ports too few, Bug 4)
+- `--num-cpus`: 256 → 32 (fd exhaustion with default ulimit, Bug 5)
+- Removed `--memory` flag (let Ray auto-detect, was unnecessary)
+- Health check: `curl -sf .../health` → `curl -s --connect-timeout 2 .../` (Bug 9)
+
+**docker-compose.yml fix (Bug 5):**
+- Added `nofile: soft: 65536, hard: 65536` to ulimits section
+
+**Training script fix (Bug 11):**
+- `run_moonlight_1node_blend_smoke.sh` line 10: removed `--wait` (not handled by script)
+
+**Venv extraction (Bug 6):**
+- Extracted Docker image's per-server venvs to local filesystem via `docker cp`
+- Ensures mount overlay sees correct venvs (matching Ray versions, correct deps)
+
+### Testing Status — PASSED
+
+**Image verification**: All components verified inside Docker image (see table above).
+
+**Gym server startup**: Fresh container → `start_gym_uv.sh` → all 7/7 servers healthy.
+```
+All 7 / 7 servers ready! Polling every 60s
+[init] All 6 Gym servers healthy.
+```
+
+**Scoring test suite**: 30/30 samples scored correctly across all 6 domains (4.1s total).
+```
+nemogym_math              5/5 (1.00)
+nemogym_mcqa              5/5 (1.00)
+nemogym_if                5/5 (1.00)
+nemogym_code              5/5 (1.00)
+nemogym_structured        5/5 (1.00)
+nemogym_workplace         5/5 (1.00)
+```
+Test: `python plans/nemo_gym_worker/scoring/tests/test_scoring.py`
+
+**Operations**:
+```bash
+# Start servers
+docker exec vrl bash -c 'cd /root/myCodeLab/host/verl && bash my_scripts/start_gym_uv.sh'
+
+# Check status
+docker exec vrl bash -c 'cd /root/myCodeLab/host/verl && bash my_scripts/start_gym_uv.sh --status'
+
+# Run training
+docker exec vrl bash -c 'cd /root/myCodeLab/host/verl && bash my_scripts/run_moonlight_1node_blend_smoke.sh'
+```
 
 ---
 

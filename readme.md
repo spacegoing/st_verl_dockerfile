@@ -22,10 +22,9 @@ st_verl_dockerfile/
     nemo_2602_image_anatomy.md   # 303-layer build phase analysis of nemo:26.02
   verl/                         # verl source (editable install)
     my_scripts/                 # Training launch scripts, Gym server launcher
-  Gym/                          # NemoGym source (editable install, iter2)
+  Gym/                          # NemoGym source (isolated .venv + per-server venvs via ng_run)
   vllm/                         # vLLM 0.12.0 source (built into image, not editable at runtime)
   mbridge/                      # Megatron-Bridge pip package
-  verifiable-instructions/      # Gym dep for instruction_following domain
   nltk_data/                    # NLTK tokenization data
   downloads/                    # Models + datasets (mount: /mnt/public/lichang93/downloads)
     models/Moonlight16B/        # Moonlight-16B weights
@@ -92,8 +91,9 @@ and the docker-compose mount overlays the image's copy with live host source.
 
 Rebuild is only needed when:
 - Adding new packages to L5 (use `uv pip install --no-cache --no-deps`)
-- Changing `mbridge/`, `vllm/`, or `verifiable-instructions/` source
+- Changing `mbridge/` or `vllm/` source
 - Modifying static configs (`o200k_base.tiktoken`, `.tmux.conf`, `to_append.sh`, `nltk_data/`)
+- Gym dependency changes (ng_run dry_run recreates per-server venvs)
 
 **Tip**: To avoid invalidating cache for heavy layers (L1-L4), add small new pip packages
 to a new late layer rather than appending to L5.
@@ -173,9 +173,7 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
         wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
         hydra-core bitsandbytes orjson \
         transformers==4.57.3 \
-        model_hosting_container_standards anthropic \
-        pyvers math_verify latex2sympy2_extended openapi_schema_validator \
-        langdetect absl-py immutabledict \
+        pyvers \
         yappi itsdangerous gprof2dot pydot && \
     wandb login df3cecbfc0874c8a352c40820becf4a15575614e
 ```
@@ -242,35 +240,58 @@ No symlinks, no host path assumptions.
 Symlink points to `/opt/venv/` site-packages (the actual runtime location where `uv pip`
 installs packages), not `/usr/local/` dist-packages.
 
-### Layers 10-12 — COPY codebases (change most often)
+### Layers 10-11 — COPY codebases (change most often)
 
 ```dockerfile
 COPY verl /root/myCodeLab/host/verl/
 COPY Gym /root/myCodeLab/host/Gym/
-COPY verifiable-instructions /tmp/verifiable-instructions/
 ```
 
 Placed last: code change only invalidates L10-L15 (~2min rebuild), not L1-L4 (30min).
 
-Directory names must match host filesystem so editable `.pth` paths resolve through the
-docker-compose mount overlay.
+`verifiable-instructions` no longer COPYed — Gym's `lc_fix` branch pulls it from
+`git+https://github.com/spacegoing/my_verifiable-instructions.git` via
+`instruction_following/requirements.txt`.
 
-### Layer 13 — Install verl + Gym + verifiable-instructions
+### Layer 12 — Install verl
 
 ```dockerfile
-RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e . && \
-    cd /root/myCodeLab/host/Gym && uv pip install --no-build-isolation --no-deps -e . && \
-    cd /tmp/verifiable-instructions && uv pip install --no-build-isolation --no-deps . && \
-    rm -rf /tmp/verifiable-instructions
+RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e .
 ```
 
-verl and Gym: editable (`-e`) — docker-compose mount replaces the COPY'd source with
-live host source at runtime.
+verl editable install into `/opt/venv/` — accessible to the training loop.
 
-Gym is `--no-deps` to avoid pulling unwanted deps (mlflow, openai client, etc.).
-Server infra deps (fastapi, uvicorn, aiohttp, ray) are already in the base image.
+### Layer 13 — Gym isolated venv + ng_run per-server venvs
 
-verifiable-instructions: non-editable (Gym dep for instruction_following domain).
+```dockerfile
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cd /root/myCodeLab/host/Gym && \
+    mkdir -p cache && \
+    /root/.local/bin/uv venv --python 3.12 .venv && \
+    /root/.local/bin/uv pip install -e ".[dev]" --python .venv/bin/python && \
+    /root/.local/bin/uv pip install \
+        langdetect openapi_schema_validator math_verify \
+        absl-py nltk immutabledict \
+        --python .venv/bin/python && \
+    cp /root/myCodeLab/host/verl/my_scripts/gym_env.yaml \
+       /root/myCodeLab/host/Gym/env.yaml && \
+    .venv/bin/ng_run \
+        "+config_paths=[/root/myCodeLab/host/verl/my_scripts/gym_blend_servers.yaml]" \
+        "+dry_run=true" && \
+    ln -sf /root/myCodeLab/host/Gym/resources_servers/code_gen/lcb_integration \
+        /usr/local/lib/python3.12/dist-packages/lcb_integration
+```
+
+Gym gets its own isolated `.venv` (not in `/opt/venv/`). Key steps:
+
+1. **uv upgrade** — Gym requires >= 0.9.30 (base has 0.7.2)
+2. **Gym main .venv** — `.[dev]` installs core Gym + deps; extra packages for domain verifiers
+3. **ng_run dry_run** — creates 7 per-server venvs with proper isolation (~5 min on overlay disk).
+   At runtime, `skip_venv_if_present=true` → instant startup
+4. **env.yaml** — policy_model placeholder for `${policy_base_url}` interpolation
+5. **lcb_integration symlink** — code_gen `@ray.remote` workers need system-importable `lcb_integration`
+
+See `verl/plans/nemo_gym_worker/` for full design docs.
 
 ### Layers 14-15 — Final
 
@@ -312,6 +333,7 @@ host (`/mnt/public/lichang93/downloads/`).
 | `privileged` | `true` | RDMA/InfiniBand `/dev/infiniband/` access |
 | `memlock` | `-1` (unlimited) | RDMA pins GPU memory buffers |
 | `stack` | `67108864` (64MB) | Deep call stacks in megatron-core pipeline parallelism |
+| `nofile` | `65536` | Gym Ray cluster with `--num-cpus=32` needs >1024 fds |
 
 ### Environment Variables
 
@@ -353,30 +375,33 @@ explicit stop or training crash (prevents checkpoint corruption).
 
 ---
 
-## Iter2: Gym Server Integration
+## Gym Server Integration (ng_run)
 
-Gym resource servers run as local FastAPI services inside the container. Each domain
-has its own `/verify` HTTP endpoint:
+Gym resource servers run as local FastAPI services via `ng_run` (Gym's official CLI).
+Each domain has its own isolated `.venv` and `/verify` HTTP endpoint:
 
-| Domain | Port | Data Source |
-|--------|------|-------------|
-| code_gen | 19001 | nemogym_code |
-| mcqa | 19002 | nemogym_mcqa |
-| instruction_following | 19003 | nemogym_if |
-| structured_outputs | 19004 | nemogym_structured |
-| workplace_assistant | 19005 | nemogym_workplace |
-| math_with_judge | 19006 | nemogym_math |
+| Domain | Port | Data Source | Uses Ray? |
+|--------|------|-------------|-----------|
+| code_gen | 20001 | nemogym_code | YES |
+| mcqa | 20002 | nemogym_mcqa | No |
+| instruction_following | 20003 | nemogym_if | No |
+| structured_outputs | 20004 | nemogym_structured | No |
+| workplace_assistant | 20005 | nemogym_workplace | No |
+| math_with_judge | 20006 | nemogym_math | No |
+
+**Architecture**: Dual Ray cluster design — Gym Ray (port 6380, `/tmp/ray_gym/`) isolated
+from verl Ray (port 6379, `/tmp/ray/`). See `verl/plans/nemo_gym_worker/design_manual.md`.
 
 **Key files**:
-- `verl/my_scripts/gym_server_runner.py` — standalone launcher per domain
-- `verl/my_scripts/launch_gym_servers.sh` — launches all 6 servers with health checks
+- `verl/my_scripts/start_gym_uv.sh` — starts Gym Ray cluster + all 6 servers via ng_run
+- `verl/my_scripts/gym_blend_servers.yaml` — server config (ports 20001-20006)
+- `verl/my_scripts/gym_env.yaml` — policy_model placeholder env vars
 - `verl/verl/workers/reward_manager/nemogym_server.py` — multi-domain reward manager
 - `verl/my_scripts/run_moonlight_1node_blend_smoke.sh` — training script (auto-launches servers)
+- `verl/plans/nemo_gym_worker/` — full design docs, research, configs
 
 **Dataset**: `downloads/datasets/nemogym_blend/train_v2.parquet` — 93,244 samples across
 all 6 domains (math patched from HF via `patch_blend_local.py`).
-
-See `dev_manual_iter2_gym_server.md` for full implementation details and bug log.
 
 ---
 
