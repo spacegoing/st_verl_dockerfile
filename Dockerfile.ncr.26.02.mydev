@@ -4,9 +4,18 @@
 # Design principles:
 #   1. Heavy compilation (vLLM, CUDA extensions) in early layers → cache friendly
 #   2. Frequently-changed code (verl, Gym) in late layers → fast rebuilds
-#   3. All pip installs use --no-deps to protect base image packages
+#   3. All installs use --no-deps to protect base image packages
 #   4. No host path assumptions — mount point is set via docker-compose volumes
 #   5. Minimal layers (legacy builder limit: 127, base has ~107)
+#
+# IMPORTANT — Package Manager Strategy (see docs/pip_vs_uv_investigation.md):
+#   nemo:26.02 uses a DUAL-LAYER Python architecture:
+#     HIGH PRIORITY: /opt/venv/lib/python3.12/site-packages/  (uv-managed)
+#     LOW PRIORITY:  /usr/local/lib/python3.12/dist-packages/ (system/pip)
+#   Python imports from /opt/venv/ FIRST. Using plain `pip install` writes to
+#   /usr/local/ which is SHADOWED by any same-named package in /opt/venv/.
+#   → We use `uv pip install` for ALL packages to write to /opt/venv/ (correct).
+#   → `pip uninstall` is still used to clean up system site-packages.
 #
 # Build (proxy ON for pip, proxy OFF for aliyuncs push):
 #   dvon  # enable docker proxy for build
@@ -16,39 +25,49 @@
 #   dvoff  # disable proxy before push
 #   docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
 #
-# "DO NOT TOUCH" packages from 26.02 base (protected by --no-deps):
-#   torch=2.10.0a0  torchvision=0.25.0a0  pytorch-triton=3.5.0
-#   flash_attn=2.7.4.post1+25.11  flashinfer=0.5.3
-#   transformer_engine=2.12.0  deep_ep=1.2.1  nvfuser=0.2.34
-#   torchao=0.14.0  torch_tensorrt=2.10.0a0  tensorrt=10.14.1.48
-#   nvidia-modelopt=0.37.0  nvidia-resiliency-ext=0.4.1+cuda13
+# "DO NOT TOUCH" packages from 26.02 base (RUNTIME versions from /opt/venv/):
+#   torch=2.10.0a0+nv25.11  torchvision=0.25.0a0  pytorch-triton=3.5.0
+#   flash_attn=2.7.4.post1  flashinfer=0.6.4  transformer_engine=2.12.0
+#   deep_ep=1.2.1  nvfuser=0.2.34  torchao=0.14.0
+#   torch_tensorrt=2.10.0a0  tensorrt=10.14.1.48
+#   nvidia-modelopt=0.41.0  nvidia-resiliency-ext=0.4.1+cuda13
 #   numpy=1.26.4  cuda-bindings=13.1.1  cuda-python=13.1.1
 #   apex=0.1  cupy-cuda12x=14.0.1  compressed-tensors=0.13.0
+#   protobuf=5.29.6  pydantic=2.13.0b1  fastapi=0.132.0
 # =============================================================================
 FROM nvcr.io/nvidia/nemo:26.02
 
 # ── Layer 1: vLLM swap (uninstall base 0.14.2, prep for custom 0.12.0) ──────
-RUN pip uninstall -y vllm && \
-    pip install --no-cache-dir setuptools_scm
+#   pip uninstall removes from /usr/local/; uv pip uninstall removes from /opt/venv/
+#   We clean both locations to ensure no leftover vllm metadata.
+RUN pip uninstall -y vllm 2>/dev/null; \
+    uv pip uninstall vllm 2>/dev/null; \
+    uv pip install --no-cache setuptools_scm; true
 
 # ── Layer 2: Copy vLLM 0.12.0 source ────────────────────────────────────────
 COPY vllm /opt/vllm
 
 # ── Layer 3: Build vLLM 0.12.0 (CUDA compilation — slowest step, ~30min) ────
+#   --no-build-isolation: use system CUDA/torch for compilation
+#   Installs to /opt/venv/ via uv pip (correct priority location)
 RUN cd /opt/vllm && \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 \
-    pip install --no-deps --no-build-isolation --no-cache-dir -e .
+    uv pip install --no-deps --no-build-isolation --no-cache -e .
 
 # ── Layer 4: CUDA extensions (need NVCC, second slowest) ─────────────────────
-RUN pip install --no-cache-dir --no-deps --no-build-isolation grouped_gemm && \
-    pip install --no-cache-dir --no-deps --no-build-isolation causal_conv1d && \
-    pip install --no-cache-dir --no-deps --no-build-isolation mamba_ssm
+RUN uv pip install --no-cache --no-deps --no-build-isolation grouped_gemm && \
+    uv pip install --no-cache --no-deps --no-build-isolation causal_conv1d && \
+    uv pip install --no-cache --no-deps --no-build-isolation mamba_ssm
 
-# ── Layer 5: System packages + pure-python pip deps (rarely changes) ─────────
+# ── Layer 5: System packages + pure-python deps (rarely changes) ─────────────
+#   apt-get: system tools unrelated to Python packaging
+#   uv pip install --no-deps: installs to /opt/venv/ (HIGH priority)
+#   transformers: pinned to match what verl expects (overrides venv's 4.57.6)
+#   wandb: our version (overrides venv's 0.24.0)
 RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*' && \
-    pip install --no-cache-dir --no-deps \
+    uv pip install --no-cache --no-deps \
         wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
         hydra-core bitsandbytes orjson \
         transformers==4.57.3 \
@@ -60,7 +79,7 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
 
 # ── Layer 6: Copy + install mbridge (small, stable) ─────────────────────────
 COPY mbridge /tmp/mbridge
-RUN cd /tmp/mbridge && pip3 install --no-cache-dir --no-deps . && rm -rf /tmp/mbridge
+RUN cd /tmp/mbridge && uv pip install --no-cache --no-deps . && rm -rf /tmp/mbridge
 
 # ── Layer 7: Static config files ─────────────────────────────────────────────
 COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
@@ -73,13 +92,14 @@ ENV NLTK_DATA=/usr/local/share/nltk_data \
 # ── Layer 9: Setup workspace + configs (no host path assumptions) ────────────
 #   /root/myCodeLab/host will be a mount point (set in docker-compose.yml)
 #   /root/myCodeLab/public will be a mount point (set in docker-compose.yml)
+#   Symlink points to /opt/venv/ site-packages (the actual runtime location)
 RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache && \
     mv /tmp/docker_context/o200k_base.tiktoken /root/tiktoken_cache/ && \
     echo "" >> /root/.bashrc && \
     cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
     mv /tmp/docker_context/.tmux.conf /root/ && \
     rm -rf /tmp/docker_context && \
-    ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
+    ln -s /opt/venv/lib/python3.12/site-packages /root/myCodeLab/site-packages
 
 # ── Layer 10-12: Copy codebases (LAST — these change most often) ─────────────
 COPY verl /root/myCodeLab/host/verl/
@@ -87,16 +107,17 @@ COPY Gym /root/myCodeLab/host/Gym/
 COPY verifiable-instructions /tmp/verifiable-instructions/
 
 # ── Layer 13: Install verl + Gym + verifiable-instructions ───────────────────
-#   Gym installed with --no-deps to avoid pulling unwanted deps (mlflow etc).
+#   Editable installs use .pth files → always resolve before site-packages,
+#   so they work regardless of pip/uv split.
+#   Gym: --no-deps avoids pulling unwanted deps (mlflow etc).
 #   Server infra deps (fastapi, uvicorn, aiohttp, ray, yappi, itsdangerous)
-#   are already in the base image or added to L5 above.
-#   Gym resource servers run locally as FastAPI services for reward verification.
-#   verifiable-instructions is a Gym dependency for instruction_following domain.
-#   At runtime, the mount overlays /root/myCodeLab/host/ so editable installs
+#   are already in the base image or added in L5.
+#   verifiable-instructions: Gym dependency for instruction_following domain.
+#   At runtime, mount overlays /root/myCodeLab/host/ so editable installs
 #   point to the mounted (live) source code.
-RUN cd /root/myCodeLab/host/verl && pip3 install --no-build-isolation --no-deps -e . && \
-    cd /root/myCodeLab/host/Gym && pip3 install --no-build-isolation --no-deps -e . && \
-    cd /tmp/verifiable-instructions && pip3 install --no-build-isolation --no-deps . && \
+RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e . && \
+    cd /root/myCodeLab/host/Gym && uv pip install --no-build-isolation --no-deps -e . && \
+    cd /tmp/verifiable-instructions && uv pip install --no-build-isolation --no-deps . && \
     rm -rf /tmp/verifiable-instructions
 
 # ── Layer 14-15: Final ───────────────────────────────────────────────────────

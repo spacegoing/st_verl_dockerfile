@@ -17,6 +17,7 @@ st_verl_dockerfile/
   .gitignore / .tmux.conf / to_append.sh / o200k_base.tiktoken  # Static configs
   docs/
     reward_callstack_analysis.md  # verl reward manager callstack analysis
+    pip_vs_uv_investigation.md   # Why 26.02 has dual pip/uv, package shadowing analysis
   verl/                         # verl source (editable install)
     my_scripts/                 # Training launch scripts, Gym server launcher
   Gym/                          # NemoGym source (editable install, iter2)
@@ -88,7 +89,7 @@ Editing `verl/` or `Gym/` source **does NOT require rebuild** — they are edita
 and the docker-compose mount overlays the image's copy with live host source.
 
 Rebuild is only needed when:
-- Adding new pip packages to L5
+- Adding new packages to L5 (use `uv pip install --no-cache --no-deps`)
 - Changing `mbridge/`, `vllm/`, or `verifiable-instructions/` source
 - Modifying static configs (`o200k_base.tiktoken`, `.tmux.conf`, `to_append.sh`, `nltk_data/`)
 
@@ -107,12 +108,17 @@ Layer order: slowest/most stable first (cache friendly), fastest/most changed la
 ### Layer 1 — vLLM prep
 
 ```dockerfile
-RUN pip uninstall -y vllm && pip install --no-cache-dir setuptools_scm
+RUN pip uninstall -y vllm 2>/dev/null; \
+    uv pip uninstall vllm 2>/dev/null; \
+    uv pip install --no-cache setuptools_scm; true
 ```
 
 26.02 ships vLLM 0.14.2. verl requires exactly 0.12.0 because 0.13+ changed the rollout
 worker API. `setuptools_scm` is needed because vLLM's build system requires it, and the
 `.git/` directory is stripped from the COPY'd source (to save 1.6GB build context).
+
+Both `pip` and `uv pip` uninstall are used because vllm may exist in both the system
+site-packages (`/usr/local/`) and the venv (`/opt/venv/`).
 
 ### Layer 2 — COPY vLLM source
 
@@ -128,12 +134,12 @@ Source in `vllm/` must be pre-cleaned: delete `.git/`, `.deps/`, `tests/`, `docs
 ```dockerfile
 RUN cd /opt/vllm && \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 \
-    pip install --no-deps --no-build-isolation --no-cache-dir -e .
+    uv pip install --no-deps --no-build-isolation --no-cache -e .
 ```
 
 Slowest step — placed early so code changes don't trigger recompile.
 
-`--no-build-isolation`: Prevents pip from creating isolated venv that downloads its own
+`--no-build-isolation`: Prevents creating an isolated venv that downloads its own
 torch (CUDA 12.6), which would conflict with the base image's torch 2.10.0a0 (CUDA 13.0).
 
 `--no-deps`: Protects all base image packages.
@@ -147,21 +153,21 @@ resolves from the image layer (immutable). This is intentional.
 ### Layer 4 — CUDA extension packages
 
 ```dockerfile
-RUN pip install --no-cache-dir --no-deps --no-build-isolation grouped_gemm && \
-    pip install --no-cache-dir --no-deps --no-build-isolation causal_conv1d && \
-    pip install --no-cache-dir --no-deps --no-build-isolation mamba_ssm
+RUN uv pip install --no-cache --no-deps --no-build-isolation grouped_gemm && \
+    uv pip install --no-cache --no-deps --no-build-isolation causal_conv1d && \
+    uv pip install --no-cache --no-deps --no-build-isolation mamba_ssm
 ```
 
 Were in nemo:25.11.01 but removed in 26.02. Imported by megatron-core (MoE expert GEMM,
 SSM architecture). Each requires NVCC compilation.
 
-### Layer 5 — System packages + pure-Python pip deps
+### Layer 5 — System packages + pure-Python deps
 
 ```dockerfile
 RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*' && \
-    pip install --no-cache-dir --no-deps \
+    uv pip install --no-cache --no-deps \
         wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
         hydra-core bitsandbytes orjson \
         transformers==4.57.3 \
@@ -174,10 +180,15 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
 
 All pure-Python or pre-built wheels — no NVCC needed.
 
-`--no-deps` for every pip install: Without it, `wandb` would pull `numpy>=2.0` which
+`uv pip install` writes to `/opt/venv/lib/python3.12/site-packages/` (HIGH priority).
+This is critical — plain `pip install` would write to `/usr/local/` (LOW priority),
+where packages are shadowed by the venv copy. See `docs/pip_vs_uv_investigation.md`.
+
+`--no-deps` for every install: Without it, `wandb` would pull `numpy>=2.0` which
 would overwrite the base's `numpy==1.26.4`, breaking every CUDA extension's C ABI.
 
-`transformers==4.57.3`: Overrides the base's 4.56.0. verl and Moonlight config require 4.57+.
+`transformers==4.57.3`: Overrides the venv's 4.57.6. Now effective because `uv pip`
+installs to the HIGH priority location.
 
 `yappi itsdangerous gprof2dot pydot`: Required by Gym's `profiling.py` module-level imports.
 
@@ -188,7 +199,7 @@ mounted volumes.
 
 ```dockerfile
 COPY mbridge /tmp/mbridge
-RUN cd /tmp/mbridge && pip3 install --no-cache-dir --no-deps . && rm -rf /tmp/mbridge
+RUN cd /tmp/mbridge && uv pip install --no-cache --no-deps . && rm -rf /tmp/mbridge
 ```
 
 Pure-Python bridge between verl and megatron-core. Non-editable (rarely changes).
@@ -220,11 +231,14 @@ RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache &&
     cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
     mv /tmp/docker_context/.tmux.conf /root/ && \
     rm -rf /tmp/docker_context && \
-    ln -s /usr/local/lib/python3.12/dist-packages /root/myCodeLab/dist-packages
+    ln -s /opt/venv/lib/python3.12/site-packages /root/myCodeLab/site-packages
 ```
 
 `mkdir -p /root/myCodeLab/host`: Creates the directory that docker-compose will mount over.
 No symlinks, no host path assumptions.
+
+Symlink points to `/opt/venv/` site-packages (the actual runtime location where `uv pip`
+installs packages), not `/usr/local/` dist-packages.
 
 ### Layers 10-12 — COPY codebases (change most often)
 
@@ -242,9 +256,9 @@ docker-compose mount overlay.
 ### Layer 13 — Install verl + Gym + verifiable-instructions
 
 ```dockerfile
-RUN cd /root/myCodeLab/host/verl && pip3 install --no-build-isolation --no-deps -e . && \
-    cd /root/myCodeLab/host/Gym && pip3 install --no-build-isolation --no-deps -e . && \
-    cd /tmp/verifiable-instructions && pip3 install --no-build-isolation --no-deps . && \
+RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e . && \
+    cd /root/myCodeLab/host/Gym && uv pip install --no-build-isolation --no-deps -e . && \
+    cd /tmp/verifiable-instructions && uv pip install --no-build-isolation --no-deps . && \
     rm -rf /tmp/verifiable-instructions
 ```
 
@@ -281,7 +295,7 @@ volumes:
 ```
 
 The project mount makes editable installs work at runtime — `.pth` files (in
-`dist-packages/`) point to `/root/myCodeLab/host/verl/` and `/root/myCodeLab/host/Gym/`
+`site-packages/`) point to `/root/myCodeLab/host/verl/` and `/root/myCodeLab/host/Gym/`
 which resolve through the mount to live code.
 
 Downloads mount is separate because `downloads/` lives outside the project dir on the
@@ -403,5 +417,6 @@ dvon / dvoff   # Docker daemon proxy (restarts docker!)
 
 - `dev_manual_iter2_gym_server.md` — Iter2 migration plan, implementation details, bug log
 - `image_deps_report_v2.md` — Exhaustive 3-image dependency diff (25.11.01 vs 26.02 vs myverl)
+- `docs/pip_vs_uv_investigation.md` — pip vs uv dual-layer analysis, package shadowing
 - `docs/reward_callstack_analysis.md` — verl reward manager callstack analysis
 - `legacy/` — Old Dockerfiles, iter1 docs, MJ_NEMO_GYM, verl.old, inspection scripts
