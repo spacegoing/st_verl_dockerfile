@@ -15,7 +15,7 @@
 #   Inside container: /root/myCodeLab/host/downloads/
 
 x-common: &common
-  image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+  image: myverl:ncr2602_vllm012.dev
   entrypoint: /bin/bash
   stdin_open: true
   tty: true
@@ -77,29 +77,29 @@ services:
   head:
     <<: *common
     container_name: vrl
-    hostname: b31
+    hostname: b32
     extra_hosts:
-      - "b31:10.12.11.5"
       - "b32:10.12.11.6"
+      - "b31:10.12.11.5"
     command:
       - -c
       - >-
         ray start --head --port=6379 --dashboard-port=8265
         --num-gpus=8 --num-cpus=64
-        --node-ip-address=10.12.11.5
+        --node-ip-address=10.12.11.6
         && tail -f /dev/null
 
   worker:
     <<: *common
     container_name: vrl
-    hostname: b32
+    hostname: b31
     extra_hosts:
-      - "b31:10.12.11.5"
       - "b32:10.12.11.6"
+      - "b31:10.12.11.5"
     command:
       - -c
       - >-
         ray start --address=10.12.11.5:6379
         --num-gpus=8 --num-cpus=64
-        --node-ip-address=10.12.11.6
+        --node-ip-address=10.12.11.5
         && tail -f /dev/null
