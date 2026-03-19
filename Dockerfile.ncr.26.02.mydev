@@ -1,105 +1,23 @@
 # =============================================================================
-# Dockerfile: verl Moonlight Training on B300 (nemo:26.02 base)
+# Dockerfile: verl Moonlight Training on B300 — dev image
 # =============================================================================
-# Design principles:
-#   1. Heavy compilation (vLLM, CUDA extensions) in early layers → cache friendly
-#   2. Frequently-changed code (verl, Gym) in late layers → fast rebuilds
-#   3. All installs use --no-deps to protect base image packages
-#   4. No host path assumptions — mount point is set via docker-compose volumes
-#   5. Minimal layers (legacy builder limit: 127, base has ~107)
+# Builds on top of the stable base image (Dockerfile.base) which contains
+# vLLM, CUDA extensions, and system deps. Only the frequently-changed layers
+# are here: verl code, Gym code, and Gym venvs.
 #
-# IMPORTANT — Package Manager Strategy (see docs/pip_vs_uv_investigation.md):
-#   nemo:26.02 uses a DUAL-LAYER Python architecture:
-#     HIGH PRIORITY: /opt/venv/lib/python3.12/site-packages/  (uv-managed)
-#     LOW PRIORITY:  /usr/local/lib/python3.12/dist-packages/ (system/pip)
-#   Python imports from /opt/venv/ FIRST. Using plain `pip install` writes to
-#   /usr/local/ which is SHADOWED by any same-named package in /opt/venv/.
-#   → We use `uv pip install` for ALL packages to write to /opt/venv/ (correct).
-#   → `pip uninstall` is still used to clean up system site-packages.
+# Rebuild this whenever verl or Gym code changes (~10-15 min, no CUDA compile).
+# Rebuild Dockerfile.base only when vLLM/CUDA/system packages change (~30 min).
 #
-# Build (proxy ON for pip, proxy OFF for aliyuncs push):
-#   dvon  # enable docker proxy for build
+# Build:
 #   DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev \
 #     --network host \
 #     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
-#   dvoff  # disable proxy before push
-#   docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
-#
-# "DO NOT TOUCH" packages from 26.02 base (RUNTIME versions from /opt/venv/):
-#   torch=2.10.0a0+nv25.11  torchvision=0.25.0a0  pytorch-triton=3.5.0
-#   flash_attn=2.7.4.post1  flashinfer=0.6.4  transformer_engine=2.12.0
-#   deep_ep=1.2.1  nvfuser=0.2.34  torchao=0.14.0
-#   torch_tensorrt=2.10.0a0  tensorrt=10.14.1.48
-#   nvidia-modelopt=0.41.0  nvidia-resiliency-ext=0.4.1+cuda13
-#   numpy=1.26.4  cuda-bindings=13.1.1  cuda-python=13.1.1
-#   apex=0.1  cupy-cuda12x=14.0.1  compressed-tensors=0.13.0
-#   protobuf=5.29.6  pydantic=2.13.0b1  fastapi=0.132.0
+#   # Re-tag for docker-compose (uses local name):
+#   docker tag registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+#              myverl:ncr2602_vllm012.dev
+#   dvoff && docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
 # =============================================================================
-FROM nvcr.io/nvidia/nemo:26.02
-
-# ── Layer 1: vLLM swap (uninstall base 0.14.2, prep for custom 0.12.0) ──────
-#   pip uninstall removes from /usr/local/; uv pip uninstall removes from /opt/venv/
-#   We clean both locations to ensure no leftover vllm metadata.
-RUN pip uninstall -y vllm 2>/dev/null; \
-    uv pip uninstall vllm 2>/dev/null; \
-    uv pip install --no-cache setuptools_scm; true
-
-# ── Layer 2: Copy vLLM 0.12.0 source ────────────────────────────────────────
-COPY vllm /opt/vllm
-
-# ── Layer 3: Build vLLM 0.12.0 (CUDA compilation — slowest step, ~30min) ────
-#   --no-build-isolation: use system CUDA/torch for compilation
-#   Installs to /opt/venv/ via uv pip (correct priority location)
-RUN cd /opt/vllm && \
-    SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 \
-    uv pip install --no-deps --no-build-isolation --no-cache -e .
-
-# ── Layer 4: CUDA extensions (need NVCC, second slowest) ─────────────────────
-RUN uv pip install --no-cache --no-deps --no-build-isolation grouped_gemm && \
-    uv pip install --no-cache --no-deps --no-build-isolation causal_conv1d && \
-    uv pip install --no-cache --no-deps --no-build-isolation mamba_ssm
-
-# ── Layer 5: System packages + pure-python deps (rarely changes) ─────────────
-#   apt-get: system tools unrelated to Python packaging
-#   uv pip install --no-deps: installs to /opt/venv/ (HIGH priority)
-#   transformers: pinned to match what verl expects (overrides venv's 4.57.6)
-#   Gym-only packages (math_verify, langdetect, openapi_schema_validator, etc.)
-#   removed from here — they install into Gym's isolated .venv via ng_run
-#   (see plans/nemo_gym_worker/design_manual.md §4-5, README §141-178).
-RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
-    rm -rf /var/lib/apt/lists/* && \
-    git config --global --add safe.directory '*' && \
-    uv pip install --no-cache --no-deps \
-        wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
-        hydra-core bitsandbytes orjson \
-        transformers==4.57.3 \
-        pyvers \
-        yappi itsdangerous gprof2dot pydot && \
-    wandb login df3cecbfc0874c8a352c40820becf4a15575614e
-
-# ── Layer 6: Copy + install mbridge (small, stable) ─────────────────────────
-COPY mbridge /tmp/mbridge
-RUN cd /tmp/mbridge && uv pip install --no-cache --no-deps . && rm -rf /tmp/mbridge
-
-# ── Layer 7: Static config files ─────────────────────────────────────────────
-COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
-COPY nltk_data /usr/local/share/nltk_data
-
-# ── Layer 8: ENV ──────────────────────────────────────────────────────────────
-ENV NLTK_DATA=/usr/local/share/nltk_data \
-    TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
-
-# ── Layer 9: Setup workspace + configs (no host path assumptions) ────────────
-#   /root/myCodeLab/host will be a mount point (set in docker-compose.yml)
-#   /root/myCodeLab/public will be a mount point (set in docker-compose.yml)
-#   Symlink points to /opt/venv/ site-packages (the actual runtime location)
-RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache && \
-    mv /tmp/docker_context/o200k_base.tiktoken /root/tiktoken_cache/ && \
-    echo "" >> /root/.bashrc && \
-    cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
-    mv /tmp/docker_context/.tmux.conf /root/ && \
-    rm -rf /tmp/docker_context && \
-    ln -s /opt/venv/lib/python3.12/site-packages /root/myCodeLab/site-packages
+FROM registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base
 
 # ── Layer 10-11: Copy codebases (LAST — these change most often) ─────────────
 #   verifiable-instructions no longer COPYed — Gym lc_fix branch pulls it
@@ -116,11 +34,13 @@ RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-dep
 #   Architecture (design_manual.md §3-5, README Dockerfile Guide §141-178):
 #     1. Upgrade uv: Gym requires >=0.9.30, base has 0.7.2
 #        (plan_uv_gym_integration.md). Installed to ~/.local/bin/.
-#     2. Gym main .venv: isolated from /opt/venv/, holds Gym + deps
-#        .[dev] installs core Gym; extra packages for domain verifiers.
-#     3. ng_run "+dry_run=true": creates 7 per-server venvs with proper
-#        isolation (~5 min on overlay disk). At runtime, skip_venv_if_present=true
-#        → instant startup (design_manual.md §4).
+#     2. Gym main venv: /opt/gym_venvs/main/ — NOT under the docker-compose
+#        mount (/root/myCodeLab/host/). Venvs at /opt/ survive the mount and
+#        live on fast node-local disk, not the PFS (quarkfs).
+#        (see plans/nemo_gym_worker/dockerfile_decouple_uv_venv.md)
+#     3. ng_run "+dry_run=true" "+uv_venv_dir=/opt/gym_venvs": creates 7
+#        per-server venvs under /opt/gym_venvs/resources_servers/*/.venv/
+#        (also survives mount, fast disk). Serial to minimize uv cache bloat.
 #     4. env.yaml: satisfies ${policy_base_url} etc. interpolation for
 #        policy_model placeholder (gym_env.yaml, design_manual.md §8).
 #     5. lcb_integration symlink: code_gen @ray.remote workers spawn on
@@ -130,17 +50,18 @@ RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-dep
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     cd /root/myCodeLab/host/Gym && \
     mkdir -p cache && \
-    /root/.local/bin/uv venv --python 3.12 .venv && \
-    /root/.local/bin/uv pip install -e ".[dev]" --python .venv/bin/python && \
+    /root/.local/bin/uv venv --python 3.12 /opt/gym_venvs/main && \
+    /root/.local/bin/uv pip install -e ".[dev]" --python /opt/gym_venvs/main/bin/python && \
     /root/.local/bin/uv pip install \
         langdetect openapi_schema_validator math_verify \
         absl-py nltk immutabledict \
-        --python .venv/bin/python && \
+        --python /opt/gym_venvs/main/bin/python && \
     cp /root/myCodeLab/host/verl/my_scripts/gym_env.yaml \
        /root/myCodeLab/host/Gym/env.yaml && \
-    .venv/bin/ng_run \
+    /opt/gym_venvs/main/bin/ng_run \
         "+config_paths=[/root/myCodeLab/host/verl/my_scripts/gym_blend_servers.yaml]" \
-        "+dry_run=true" && \
+        "+dry_run=true" \
+        "+uv_venv_dir=/opt/gym_venvs" && \
     ln -sf /root/myCodeLab/host/Gym/resources_servers/code_gen/lcb_integration \
         /usr/local/lib/python3.12/dist-packages/lcb_integration
 
@@ -148,5 +69,5 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
 
-# Total new layers: 15 (8 RUN + 3 COPY + 1 ENV + 1 WORKDIR + 1 CMD + 1 FROM)
-# 107 + 15 = 122, well under 127 limit
+# Total new layers above base: 6 (2 RUN + 2 COPY + 1 WORKDIR + 1 CMD + 1 FROM)
+# Base has ~122 layers; adding 6 = ~128. If near limit, merge COPY layers.

@@ -1,0 +1,83 @@
+# =============================================================================
+# Dockerfile.base: Stable base image — vLLM + CUDA extensions + system deps
+# =============================================================================
+# Contains everything that requires CUDA compilation or rarely changes.
+# Rebuilt only when: vLLM version, CUDA extensions, or system packages change.
+#
+# Build (proxy ON for pip):
+#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.base \
+#     --network host \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base .
+#   dvoff && docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base
+#
+# Then rebuild the dev image:
+#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev \
+#     --network host \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
+#
+# "DO NOT TOUCH" packages from 26.02 base (RUNTIME versions from /opt/venv/):
+#   torch=2.10.0a0+nv25.11  torchvision=0.25.0a0  pytorch-triton=3.5.0
+#   flash_attn=2.7.4.post1  flashinfer=0.6.4  transformer_engine=2.12.0
+#   deep_ep=1.2.1  nvfuser=0.2.34  torchao=0.14.0
+#   torch_tensorrt=2.10.0a0  tensorrt=10.14.1.48
+#   nvidia-modelopt=0.41.0  nvidia-resiliency-ext=0.4.1+cuda13
+#   numpy=1.26.4  cuda-bindings=13.1.1  cuda-python=13.1.1
+#   apex=0.1  cupy-cuda12x=14.0.1  compressed-tensors=0.13.0
+#   protobuf=5.29.6  pydantic=2.13.0b1  fastapi=0.132.0
+# =============================================================================
+FROM nvcr.io/nvidia/nemo:26.02
+
+# ── Layer 1: vLLM swap (uninstall base 0.14.2, prep for custom 0.12.0) ──────
+RUN pip uninstall -y vllm 2>/dev/null; \
+    uv pip uninstall vllm 2>/dev/null; \
+    uv pip install --no-cache setuptools_scm; true
+
+# ── Layer 2: Copy vLLM 0.12.0 source ────────────────────────────────────────
+COPY vllm /opt/vllm
+
+# ── Layer 3: Build vLLM 0.12.0 (CUDA compilation — slowest step, ~30min) ────
+#   --no-build-isolation: use system CUDA/torch for compilation
+RUN cd /opt/vllm && \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.12.0 MAX_JOBS=64 NVCC_THREADS=1 \
+    uv pip install --no-deps --no-build-isolation --no-cache -e .
+
+# ── Layer 4: CUDA extensions (need NVCC, second slowest) ─────────────────────
+RUN uv pip install --no-cache --no-deps --no-build-isolation grouped_gemm && \
+    uv pip install --no-cache --no-deps --no-build-isolation causal_conv1d && \
+    uv pip install --no-cache --no-deps --no-build-isolation mamba_ssm
+
+# ── Layer 5: System packages + pure-python deps (rarely changes) ─────────────
+RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
+    rm -rf /var/lib/apt/lists/* && \
+    git config --global --add safe.directory '*' && \
+    uv pip install --no-cache --no-deps \
+        wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
+        hydra-core bitsandbytes orjson \
+        transformers==4.57.3 \
+        pyvers \
+        yappi itsdangerous gprof2dot pydot && \
+    wandb login df3cecbfc0874c8a352c40820becf4a15575614e
+
+# ── Layer 6: Copy + install mbridge (small, stable) ─────────────────────────
+COPY mbridge /tmp/mbridge
+RUN cd /tmp/mbridge && uv pip install --no-cache --no-deps . && rm -rf /tmp/mbridge
+
+# ── Layer 7: Static config files ─────────────────────────────────────────────
+COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
+COPY nltk_data /usr/local/share/nltk_data
+
+# ── Layer 8: ENV ──────────────────────────────────────────────────────────────
+ENV NLTK_DATA=/usr/local/share/nltk_data \
+    TIKTOKEN_ENCODINGS_BASE=/root/tiktoken_cache
+
+# ── Layer 9: Setup workspace + configs ───────────────────────────────────────
+RUN mkdir -p /root/myCodeLab/host /root/myCodeLab/public /root/tiktoken_cache && \
+    mv /tmp/docker_context/o200k_base.tiktoken /root/tiktoken_cache/ && \
+    echo "" >> /root/.bashrc && \
+    cat /tmp/docker_context/to_append.sh >> /root/.bashrc && \
+    mv /tmp/docker_context/.tmux.conf /root/ && \
+    rm -rf /tmp/docker_context && \
+    ln -s /opt/venv/lib/python3.12/site-packages /root/myCodeLab/site-packages
+
+WORKDIR /root/myCodeLab
+CMD ["/bin/bash"]

@@ -21,6 +21,7 @@ Gym/benchmarks/
 Gym/results/
 Gym/data/
 Gym/.venv
+Gym/.venv_*
 Gym/resources_servers/**/.venv
 
 # vLLM: already cleaned (.git, .deps, tests removed), but just in case

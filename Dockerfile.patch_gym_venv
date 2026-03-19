@@ -1,0 +1,43 @@
+# Patch Dockerfile: rebuild only Gym/verl layers on top of existing compiled image.
+# Use this when the full Dockerfile fails at vLLM CUDA compilation (cutlass git clone
+# network issues). Starts FROM the existing image so vLLM/CUDA layers are reused.
+#
+# Build:
+#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.patch_gym_venv \
+#     --network host \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
+FROM registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+
+# Remove old venv dirs that may have been baked into the previous image
+RUN rm -rf /root/myCodeLab/host/verl \
+           /root/myCodeLab/host/Gym \
+           /opt/gym_venvs
+
+# Re-copy updated codebases
+COPY verl /root/myCodeLab/host/verl/
+COPY Gym  /root/myCodeLab/host/Gym/
+
+# Re-install verl editable (pointer may have changed)
+RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e .
+
+# Rebuild Gym venvs at /opt/gym_venvs (decoupled from PFS mount)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cd /root/myCodeLab/host/Gym && \
+    mkdir -p cache && \
+    /root/.local/bin/uv venv --python 3.12 /opt/gym_venvs/main && \
+    /root/.local/bin/uv pip install -e ".[dev]" --python /opt/gym_venvs/main/bin/python && \
+    /root/.local/bin/uv pip install \
+        langdetect openapi_schema_validator math_verify \
+        absl-py nltk immutabledict \
+        --python /opt/gym_venvs/main/bin/python && \
+    cp /root/myCodeLab/host/verl/my_scripts/gym_env.yaml \
+       /root/myCodeLab/host/Gym/env.yaml && \
+    /opt/gym_venvs/main/bin/ng_run \
+        "+config_paths=[/root/myCodeLab/host/verl/my_scripts/gym_blend_servers.yaml]" \
+        "+dry_run=true" \
+        "+uv_venv_dir=/opt/gym_venvs" && \
+    ln -sf /root/myCodeLab/host/Gym/resources_servers/code_gen/lcb_integration \
+        /usr/local/lib/python3.12/dist-packages/lcb_integration
+
+WORKDIR /root/myCodeLab
+CMD ["/bin/bash"]
