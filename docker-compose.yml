@@ -65,6 +65,10 @@ x-common: &common
     RAY_ENABLE_OPENTELEMETRY: "0"
     TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
 
+    # Python pyc cache — redirect to local /tmp to avoid PFS write pressure
+    # (verl and nemo_gym are editable PFS installs; without this, __pycache__ dirs accumulate on PFS)
+    PYTHONPYCACHEPREFIX: "/tmp/pycache"
+
     # wandb
     WANDB_MODE: offline
   deploy:

@@ -39,6 +39,7 @@ verifiable-instructions/
 legacy/
 downloads/
 docs/
+gym_rollout/
 *.md
 .gitignore
 docker-compose.yml

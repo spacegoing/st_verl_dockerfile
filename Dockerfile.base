@@ -4,16 +4,51 @@
 # Contains everything that requires CUDA compilation or rarely changes.
 # Rebuilt only when: vLLM version, CUDA extensions, or system packages change.
 #
-# Build (proxy ON for pip):
-#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.base \
+# Build + push in one step (uses BuildKit; --push avoids the local-store push issue):
+#   PROXY=http://jdtcom:709a64b73eb3@10.119.176.202:3128
+#   NO_PROXY=registry.cn-hangzhou.aliyuncs.com
+#   HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=$NO_PROXY \
+#   docker buildx build -f Dockerfile.base \
+#     --platform linux/amd64 \
+#     --provenance=false --sbom=false \
 #     --network host \
-#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base .
-#   dvoff && docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base
+#     --push \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base \
+#     --build-arg HTTP_PROXY=$PROXY \
+#     --build-arg HTTPS_PROXY=$PROXY \
+#     .
 #
-# Then rebuild the dev image:
-#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev \
+# KEY FLAGS explained:
+# --provenance=false --sbom=false
+#   Disables BuildKit's attestation manifests (SBOM/provenance). Without these, BuildKit wraps
+#   the image in an OCI index (manifest list) with an extra "unknown/unknown" attestation entry.
+#   Old CCRs (Aliyun, others) reject or mishandle this. With these flags: plain single-platform
+#   OCI image manifest — compatible with every registry, no manifest list issues.
+#
+# --platform linux/amd64
+#   Explicit single platform. Prevents any multi-arch metadata from nvcr.io base bleeding through.
+#
+# Why not DOCKER_BUILDKIT=0 + docker push:
+#   Docker 29 containerd snapshotter stores BUILDKIT=0 layers in overlay2 (for container runtime)
+#   but does NOT write OCI blobs to the content store. docker push reads from the content store
+#   → 85/107 base layers missing → "content digest not found". BuildKit always writes OCI blobs.
+#
+# HTTPS_PROXY + NO_PROXY:
+#   - HTTPS_PROXY: required for FROM pull of nvcr.io and RUN apt-get
+#   - NO_PROXY=registry.cn-hangzhou.aliyuncs.com: Aliyun CCR auth fails through proxy; push direct
+#   - --build-arg HTTP_PROXY: applies proxy inside RUN commands (apt-get, pip, git clone)
+#
+# Then rebuild dev image (proxy also needed: curl astral.sh for uv + git clone in ng_run):
+#   HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=$NO_PROXY \
+#   docker buildx build -f Dockerfile.ncr.26.02.mydev \
+#     --platform linux/amd64 \
+#     --provenance=false --sbom=false \
 #     --network host \
-#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
+#     --push \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+#     --build-arg HTTP_PROXY=$PROXY \
+#     --build-arg HTTPS_PROXY=$PROXY \
+#     .
 #
 # "DO NOT TOUCH" packages from 26.02 base (RUNTIME versions from /opt/venv/):
 #   torch=2.10.0a0+nv25.11  torchvision=0.25.0a0  pytorch-triton=3.5.0
@@ -26,6 +61,13 @@
 #   protobuf=5.29.6  pydantic=2.13.0b1  fastapi=0.132.0
 # =============================================================================
 FROM nvcr.io/nvidia/nemo:26.02
+
+# ── PyPI mirror (Aliyun — fast on mainland China, bypasses proxy for downloads) ─
+# Direct mainland access to mirrors.aliyun.com is ~10-50x faster than routing
+# PyPI downloads through the corporate proxy (~50-100 KB/s).
+# Override at build time if needed: --build-arg UV_DEFAULT_INDEX=https://pypi.org/simple/
+ARG UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/
+ENV UV_DEFAULT_INDEX=$UV_DEFAULT_INDEX
 
 # ── Layer 1: vLLM swap (uninstall base 0.14.2, prep for custom 0.12.0) ──────
 RUN pip uninstall -y vllm 2>/dev/null; \
@@ -51,7 +93,7 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*' && \
     uv pip install --no-cache --no-deps \
-        wandb gpustat codetiming tensordict mathruler pylatexenc torchdata \
+        wandb gpustat blessed codetiming tensordict mathruler pylatexenc torchdata \
         hydra-core bitsandbytes orjson \
         transformers==4.57.3 \
         pyvers \
@@ -63,8 +105,8 @@ COPY mbridge /tmp/mbridge
 RUN cd /tmp/mbridge && uv pip install --no-cache --no-deps . && rm -rf /tmp/mbridge
 
 # ── Layer 7: Static config files ─────────────────────────────────────────────
-COPY o200k_base.tiktoken to_append.sh .tmux.conf /tmp/docker_context/
-COPY nltk_data /usr/local/share/nltk_data
+COPY docker_assets/o200k_base.tiktoken docker_assets/to_append.sh docker_assets/.tmux.conf /tmp/docker_context/
+COPY docker_assets/nltk_data /usr/local/share/nltk_data
 
 # ── Layer 8: ENV ──────────────────────────────────────────────────────────────
 ENV NLTK_DATA=/usr/local/share/nltk_data \

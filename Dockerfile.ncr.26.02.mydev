@@ -8,29 +8,53 @@
 # Rebuild this whenever verl or Gym code changes (~10-15 min, no CUDA compile).
 # Rebuild Dockerfile.base only when vLLM/CUDA/system packages change (~30 min).
 #
-# Build:
-#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.ncr.26.02.mydev \
+# Build + push in one step (proxy needed: curl astral.sh for uv, git clone in ng_run dry_run):
+#   PROXY=http://jdtcom:709a64b73eb3@10.119.176.202:3128
+#   NO_PROXY=registry.cn-hangzhou.aliyuncs.com
+#   HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=$NO_PROXY \
+#   docker buildx build -f Dockerfile.ncr.26.02.mydev \
+#     --platform linux/amd64 \
+#     --provenance=false --sbom=false \
 #     --network host \
-#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev .
+#     --push \
+#     -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+#     --build-arg HTTP_PROXY=$PROXY \
+#     --build-arg HTTPS_PROXY=$PROXY \
+#     .
 #   # Re-tag for docker-compose (uses local name):
-#   docker tag registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
-#              myverl:ncr2602_vllm012.dev
-#   dvoff && docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+#   docker pull registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+#   docker tag  registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+#               myverl:ncr2602_vllm012.dev
+#
+# PyPI packages (uv pip install): use Aliyun mirror via UV_DEFAULT_INDEX ARG — no proxy needed.
+# See Dockerfile.base comments for full explanation of why buildx --push + --provenance=false.
 # =============================================================================
 FROM registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base
 
-# ── Layer 10-11: Copy codebases (LAST — these change most often) ─────────────
+# ── PyPI mirror (Aliyun — fast on mainland China, bypasses proxy for downloads) ─
+# ARG re-declared here because ARG scope resets after each FROM.
+# uv respects UV_DEFAULT_INDEX for all pip install commands in this image.
+ARG UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/
+ENV UV_DEFAULT_INDEX=$UV_DEFAULT_INDEX
+
+# ── Layer 10: Copy Gym config YAMLs (self-contained — no verl/my_scripts dep) ─
+#   Copied to project root at build time so the docker context is self-contained.
+#   gym_env.yaml: policy_model placeholder (satisfies ${policy_base_url} etc.)
+#   gym_blend_servers.yaml: ng_run server config (ports 20001-20007, all domains)
+COPY gym_config/ /opt/gym_config/
+
+# ── Layer 11-12: Copy codebases (LAST — these change most often) ──────────────
 #   verifiable-instructions no longer COPYed — Gym lc_fix branch pulls it
 #   from git+https://github.com/spacegoing/my_verifiable-instructions.git
 #   (see plan_uv_gym_integration.md, instruction_following/requirements.txt).
 COPY verl /root/myCodeLab/host/verl/
 COPY Gym /root/myCodeLab/host/Gym/
 
-# ── Layer 12: Install verl (editable, into /opt/venv/) ───────────────────────
+# ── Layer 13: Install verl (editable, into /opt/venv/) ───────────────────────
 #   verl stays in the system venv for training loop access.
 RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-deps -e .
 
-# ── Layer 13: Gym isolated venv + ng_run per-server venvs ────────────────────
+# ── Layer 14: Gym isolated venv + ng_run per-server venvs ────────────────────
 #   Architecture (design_manual.md §3-5, README Dockerfile Guide §141-178):
 #     1. Upgrade uv: Gym requires >=0.9.30, base has 0.7.2
 #        (plan_uv_gym_integration.md). Installed to ~/.local/bin/.
@@ -43,8 +67,8 @@ RUN cd /root/myCodeLab/host/verl && uv pip install --no-build-isolation --no-dep
 #        (also survives mount, fast disk). Serial to minimize uv cache bloat.
 #     4. env.yaml: satisfies ${policy_base_url} etc. interpolation for
 #        policy_model placeholder (gym_env.yaml, design_manual.md §8).
-#     5. lcb_integration symlink: code_gen @ray.remote workers spawn on
-#        system Python, need lcb_integration importable (README §167-169).
+#     5. lcb_integration: code_gen's @ray.remote uses runtime_env={"py_executable":
+#        sys.executable}, so workers inherit the code_gen venv — no system symlink needed.
 #   lc_fix branch: verifiable-instructions pulled from git by ng_run
 #   (no local COPY needed — see plan_uv_gym_integration.md).
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
@@ -56,18 +80,15 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
         langdetect openapi_schema_validator math_verify \
         absl-py nltk immutabledict \
         --python /opt/gym_venvs/main/bin/python && \
-    cp /root/myCodeLab/host/verl/my_scripts/gym_env.yaml \
-       /root/myCodeLab/host/Gym/env.yaml && \
+    cp /opt/gym_config/gym_env.yaml /root/myCodeLab/host/Gym/env.yaml && \
     /opt/gym_venvs/main/bin/ng_run \
-        "+config_paths=[/root/myCodeLab/host/verl/my_scripts/gym_blend_servers.yaml]" \
+        "+config_paths=[/opt/gym_config/gym_blend_servers.yaml]" \
         "+dry_run=true" \
-        "+uv_venv_dir=/opt/gym_venvs" && \
-    ln -sf /root/myCodeLab/host/Gym/resources_servers/code_gen/lcb_integration \
-        /usr/local/lib/python3.12/dist-packages/lcb_integration
+        "+uv_venv_dir=/opt/gym_venvs"
 
-# ── Layer 14-15: Final ───────────────────────────────────────────────────────
+# ── Layer 15-16: Final ───────────────────────────────────────────────────────
 WORKDIR /root/myCodeLab
 CMD ["/bin/bash"]
 
-# Total new layers above base: 6 (2 RUN + 2 COPY + 1 WORKDIR + 1 CMD + 1 FROM)
-# Base has ~122 layers; adding 6 = ~128. If near limit, merge COPY layers.
+# Total new layers above base: 7 (1 COPY yaml + 2 COPY code + 2 RUN + 1 WORKDIR + 1 CMD)
+# Base has ~122 layers; adding 7 = ~129. If near limit, merge COPY layers.

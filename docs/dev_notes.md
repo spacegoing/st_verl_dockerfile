@@ -4,6 +4,274 @@ All changes to the Docker image, Dockerfile, and project infrastructure.
 
 ---
 
+## 2026-03-20: Fix Docker Push — Switch to `docker buildx build --push`
+
+### Problem
+
+`docker push registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev` failed:
+
+```
+You're trying to push a manifest list/index which references multiple platform specific manifests,
+but not all of them are available locally or available to the remote repository.
+NotFound: content digest sha256:... not found
+```
+
+Even adding `--platform linux/amd64` to build and/or push did not fix it.
+
+### Root Cause (full diagnosis)
+
+Docker 29 with **containerd snapshotter** (`io.containerd.snapshotter.v1`) uses two separate
+storage mechanisms:
+
+- **Overlay2 snapshots**: layer filesystems for running containers (`/var/lib/docker/overlay2/`)
+- **Containerd content store**: OCI blobs (layer tarballs) needed for registry push/pull
+
+When building with `DOCKER_BUILDKIT=0`, Docker uses the legacy builder which stores layers
+**only as overlay2 snapshots**. The OCI blobs are NOT written to the content store.
+
+When `docker push` runs, it reads blobs from the content store (not overlay2). 85 out of 107
+nvcr.io base layers were missing from the content store → push fails with "content digest not
+found". The "manifest list" wording in the error is misleading; the actual issue is missing blobs.
+
+`--platform linux/amd64` on build or push does not help because the problem is missing blob data,
+not the manifest structure.
+
+### Fix: `docker buildx build --provenance=false --sbom=false --push`
+
+Two flags are critical:
+
+**`--provenance=false --sbom=false`** (the real CCR-compatibility fix)
+Without these, BuildKit adds an attestation manifest (SBOM/provenance) as an `unknown/unknown`
+platform entry. This turns every pushed image into a manifest list. Old CCRs reject it.
+With these flags: clean single-platform OCI image manifest — no manifest list, works everywhere.
+
+**`--push`** (fixes the Docker 29 overlay2 blob issue)
+BuildKit writes all layer blobs to the OCI content store during build, then uploads them directly.
+`DOCKER_BUILDKIT=0` writes layers to overlay2 only; `docker push` reads from the content store
+and can't find them → "content digest not found".
+
+```bash
+# Base image (proxy needed: nvcr.io FROM pull + apt-get in RUN):
+PROXY=http://jdtcom:709a64b73eb3@10.119.176.202:3128
+NO_PROXY=registry.cn-hangzhou.aliyuncs.com
+
+HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=$NO_PROXY \
+docker buildx build -f Dockerfile.base \
+  --platform linux/amd64 \
+  --provenance=false --sbom=false \
+  --network host \
+  --push \
+  -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.base \
+  --build-arg HTTP_PROXY=$PROXY \
+  --build-arg HTTPS_PROXY=$PROXY \
+  .
+
+# Dev image (proxy also needed: curl astral.sh for uv upgrade + git clone in ng_run dry_run):
+# PyPI packages use Aliyun mirror (UV_DEFAULT_INDEX ARG) — fast, no proxy needed for pip.
+HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=$NO_PROXY \
+docker buildx build -f Dockerfile.ncr.26.02.mydev \
+  --platform linux/amd64 \
+  --provenance=false --sbom=false \
+  --network host \
+  --push \
+  -t registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+  --build-arg HTTP_PROXY=$PROXY \
+  --build-arg HTTPS_PROXY=$PROXY \
+  .
+
+# Re-tag locally for docker-compose:
+docker pull registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+docker tag  registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+            myverl:ncr2602_vllm012.dev
+```
+
+**Why HTTPS_PROXY + NO_PROXY**: proxy needed for nvcr.io/apt; Aliyun auth fails through proxy →
+`NO_PROXY` sends the `--push` direct to Aliyun.
+
+### Layer cache behavior (BuildKit vs BUILDKIT=0)
+
+BuildKit uses **content-addressed** caching:
+- Cache key = hash(instruction text) + hash(COPYed file contents) + parent layer digest
+- Layer is rebuilt **only if its content actually changed** — mtime/timestamp changes are ignored
+- Much more reliable than BUILDKIT=0's mtime-based checking
+
+`BUILDKIT=0` was previously used to avoid the provenance manifest list issue. `--provenance=false`
+is the correct targeted fix — get BuildKit's better caching without the CCR-incompatible metadata.
+
+---
+
+## 2026-03-19: Aliyun PyPI Mirror + code_gen Ray Worker Fix
+
+### PyPI mirror for fast downloads
+
+Added `UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/` (as `ARG`/`ENV`) to both
+`Dockerfile.base` and `Dockerfile.ncr.26.02.mydev`.
+
+**Why**: Benchmarked corporate proxy throughput during docker build at ~33-96 KB/s.
+At that speed `ray` (69.6MB) alone takes ~12-15 min. Direct mainland access to
+`mirrors.aliyun.com` is significantly faster. Since `UV_DEFAULT_INDEX` is a well-known
+uv env var, it applies to all `uv pip install` commands without per-command flags.
+Can be overridden at build time: `--build-arg UV_DEFAULT_INDEX=https://pypi.org/simple/`
+
+**Proxy is still needed** for: `curl` (uv self-install from astral.sh), `git clone`
+(cutlass in vLLM build, verifiable-instructions in ng_run). Pass proxy for these via
+`--build-arg HTTP_PROXY=...` (the official Docker way — predefined proxy build args are
+automatically available in all RUN commands without `ARG` declarations in the Dockerfile).
+
+### code_gen Ray worker fix: PYTHONPATH for lcb_integration
+
+**Problem**: `check_correctness_remote` in `lcb_integration/compute_code_generation_metrics.py`
+had no `runtime_env` on `@ray.remote`. The previous workaround was `ln -sf lcb_integration →
+/usr/local/lib/python3.12/dist-packages/lcb_integration` so system Python could import it.
+This was wrong for two reasons:
+1. Ray workers should use the code_gen per-server venv (not system Python), for isolation
+2. `lcb_integration` has no `pyproject.toml`, so it can't be pip-installed — it's a plain directory
+
+**Root cause**: Ray workers spawn in a temp working directory. The server's `sys.path[0]`
+(the `code_gen/` dir) is NOT inherited by workers. So even with the correct venv, workers
+can't find `lcb_integration` unless its parent directory is on their `PYTHONPATH`.
+
+**Fix** (two parts):
+1. `py_executable: sys.executable` — workers use the code_gen venv's Python (not system Python)
+2. `env_vars: {PYTHONPATH: _CODE_GEN_DIR}` — adds `code_gen/` to workers' Python path so
+   `import lcb_integration` resolves
+
+```python
+_CODE_GEN_DIR = str(Path(__file__).parent.parent)  # evaluates to .../code_gen/ at import time
+@ray.remote(
+    scheduling_strategy="SPREAD",
+    runtime_env={
+        "py_executable": sys.executable,
+        "env_vars": {"PYTHONPATH": _CODE_GEN_DIR},
+    },
+)
+def check_correctness_remote(...):
+```
+
+`_CODE_GEN_DIR` is computed from `Path(__file__)` (path of `compute_code_generation_metrics.py`)
+→ `.parent` = `lcb_integration/` → `.parent` = `code_gen/`. Evaluated at module import time
+(when the server starts), so it always resolves to the real live path in the running container.
+
+Pattern: `env_vars.PYTHONPATH` in `runtime_env` is the standard way to make non-installed
+packages available to Ray workers. See also: `swerl_gen/eval/singularity_utils.py`.
+
+Removed the `ln -sf` workaround from `Dockerfile.ncr.26.02.mydev` (Layer 13 RUN block).
+Removed the symlink block from `start_gym_uv.sh`.
+
+### Container test checklist
+
+After each dev image rebuild, verify with:
+
+```bash
+docker run --rm --network host \
+  -v /mnt/public/lichang93/st_verl_dockerfile:/root/myCodeLab/host \
+  registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev \
+  bash -c '
+echo "=== Check 1: Gym venvs exist at /opt/ ==="
+ls /opt/gym_venvs/ && ls /opt/gym_venvs/resources_servers/
+
+echo "=== Check 2: Main venv Python ==="
+/opt/gym_venvs/main/bin/python --version
+
+echo "=== Check 3: ng_run available ==="
+/opt/gym_venvs/main/bin/ng_run --help 2>&1 | head -3
+
+echo "=== Check 4: gym_config YAMLs in /opt/ ==="
+ls /opt/gym_config/
+
+echo "=== Check 5: code_gen venv can import lcb_integration ==="
+CODE_GEN_VENV=$(ls /opt/gym_venvs/resources_servers/ | grep code_gen | head -1)
+/opt/gym_venvs/resources_servers/$CODE_GEN_VENV/.venv/bin/python -c "
+import sys; sys.path.insert(0, \"/root/myCodeLab/host/Gym/resources_servers/code_gen\")
+import lcb_integration; print(\"OK:\", lcb_integration.__file__)"
+
+echo "=== Check 5b: _CODE_GEN_DIR resolves correctly ==="
+/opt/gym_venvs/resources_servers/$CODE_GEN_VENV/.venv/bin/python -c "
+import sys; sys.path.insert(0, \"/root/myCodeLab/host/Gym/resources_servers/code_gen\")
+from lcb_integration.compute_code_generation_metrics import _CODE_GEN_DIR
+import os; print(\"_CODE_GEN_DIR:\", _CODE_GEN_DIR)
+print(\"lcb_integration dir exists:\", os.path.isdir(os.path.join(_CODE_GEN_DIR, \"lcb_integration\")))"
+
+echo "=== Check 6: verl installed in system venv ==="
+python -c "import verl; print(verl.__file__)"
+
+echo "=== Check 7: env.yaml at Gym root ==="
+ls /root/myCodeLab/host/Gym/env.yaml
+'
+```
+
+Expected: all checks print OK/paths with no errors.
+
+---
+
+## 2026-03-19: Dockerfile Base/Dev Split + Gym Venv Decoupling from PFS
+
+### What Changed
+
+Two major changes bundled in this rebuild:
+
+**1. Dockerfile split into base + dev images**
+
+Split single `Dockerfile.ncr.26.02.mydev` into two files:
+- `Dockerfile.base` (Layers 1-9: vLLM CUDA build, CUDA extensions, system deps) → tagged `ncr2602_vllm012.base`
+- `Dockerfile.ncr.26.02.mydev` now starts `FROM ncr2602_vllm012.base` with only Layers 10-15 (verl + Gym)
+
+**Why**: vLLM CUDA build (Layer 3) clones `nvidia/cutlass` from GitHub (~45MB). Connection
+through proxy drops consistently. With the old single Dockerfile, ANY code change (even a
+1-line verl fix) required surviving this network-sensitive step. The split means the base
+image is built once and pushed; dev rebuilds start FROM it and never touch CUDA compilation.
+
+Dev rebuild time: ~10-15 min (was ~30 min cold, failed 3x at cutlass git clone).
+
+**2. Gym venvs moved from PFS → /opt/gym_venvs/ (node-local disk)**
+
+- Before: Gym main venv at `Gym/.venv` (inside PFS mount at `/root/myCodeLab/host/`)
+- After: Gym main venv at `/opt/gym_venvs/main/`; per-server venvs at `/opt/gym_venvs/resources_servers/<name>/.venv/`
+
+**Why**:
+- **Mount override**: docker-compose mounts PFS project dir onto `/root/myCodeLab/host/`, which wipes
+  any venvs baked there. Venvs at `/opt/` survive the mount.
+- **PFS slowness**: quarkfs random file I/O is slow. Python import from PFS is ~5-10x slower than
+  from node-local `/opt/`. Moving venvs from PFS → local disk dramatically improves server startup.
+
+ng_run flag `+uv_venv_dir=/opt/gym_venvs` is the key — ng_run respects this for both dry_run
+(image build) and live startup, ensuring symmetry between image-baked paths and runtime paths.
+
+Runtime startup time with pre-baked venvs: ~18s (skip_venv_if_present=true, no reinstall).
+
+### Dockerfile Changes
+
+| File | Before | After |
+|------|--------|-------|
+| `Dockerfile.base` | (did not exist) | New file: Layers 1-9 from old Dockerfile |
+| `Dockerfile.ncr.26.02.mydev` | FROM nvcr.io/nvidia/nemo:26.02, 15 layers | FROM ncr2602_vllm012.base, 6 layers |
+| `Dockerfile.patch_gym_venv` | Emergency fallback (FROM existing dev, rebuild venvs) | Deleted — superseded by base/dev split |
+| L13 venv path | `Gym/.venv` | `/opt/gym_venvs/main` |
+| L13 ng_run | no `+uv_venv_dir` | `+uv_venv_dir=/opt/gym_venvs` |
+
+### .dockerignore Changes
+- Added `Gym/.venv_*` — excludes stale test venvs (`.venv_test`, `.venv_test2`, etc.) that had
+  transient build artifacts causing "file not found in context" errors during docker build context scan
+
+### start_gym_uv.sh Changes
+- `GYM_VENV_DIR=/opt/gym_venvs` (new var)
+- `GYM_RAY`: `${GYM_DIR}/.venv/bin/ray` → `${GYM_VENV_DIR}/main/bin/ray`
+- ng_run binary: `.venv/bin/ng_run` → `/opt/gym_venvs/main/bin/ng_run`
+- Added `+uv_venv_dir=${GYM_VENV_DIR}` to ng_run call
+
+### Build Timings (from docker history)
+- COPY verl: ~1m08s (575MB — PFS read slow)
+- COPY Gym: ~35s (27.8MB)
+- verl install: ~35s
+- Layer 13 (Gym venvs): ~18 min first time (uv cache cold); ~1-2 min warm
+- Per-server venv installs during build: 850-978ms each (7 servers, uv cache warm on overlay fs)
+
+### Images Pushed
+- `ncr2602_vllm012.base`: 55.3GB
+- `ncr2602_vllm012.dev`: 69.9GB
+
+---
+
 ## 2026-03-13: ng_run Gym Integration (Isolated Venv Architecture)
 
 ### What Changed

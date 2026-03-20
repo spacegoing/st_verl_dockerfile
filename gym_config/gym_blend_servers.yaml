@@ -1,0 +1,76 @@
+# Resource servers for 6-domain blend training + policy model placeholder
+# Usage: cd /root/myCodeLab/host/Gym && .venv/bin/ng_run \
+#   "+config_paths=[/root/myCodeLab/host/verl/my_scripts/gym_blend_servers.yaml]" \
+#   --config-dir /root/myCodeLab/host/verl/my_scripts \
+#   --config-name gym_env
+
+# ── Policy model (required by math_with_judge judge_model_server ref) ──
+# Starts a proxy server but never called since should_use_judge=false.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+# ── Resource servers (ports 20001-20006, outside Ray's default worker range 10002-19999) ──
+code_gen:
+  resources_servers:
+    code_gen:
+      entrypoint: app.py
+      domain: coding
+      num_processes: 4
+      unit_test_timeout_secs: 30
+      debug: false
+      port: 20001
+
+mcqa:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+      domain: knowledge
+      port: 20002
+
+instruction_following:
+  resources_servers:
+    instruction_following:
+      entrypoint: app.py
+      domain: instruction_following
+      port: 20003
+
+structured_outputs:
+  resources_servers:
+    structured_outputs:
+      entrypoint: app.py
+      domain: instruction_following
+      port: 20004
+
+workplace_assistant:
+  resources_servers:
+    workplace_assistant:
+      entrypoint: app.py
+      domain: agent
+      port: 20005
+
+math_with_judge:
+  resources_servers:
+    math_with_judge:
+      entrypoint: app.py
+      domain: math
+      should_use_judge: false
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      port: 20006
+
+qydomain:
+  resources_servers:
+    qydomain:
+      entrypoint: app.py
+      domain: games
+      port: 20007

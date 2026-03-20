@@ -1,0 +1,6 @@
+# env.yaml for ng_run — policy model placeholder
+# The vllm_model server starts but is unused (should_use_judge: false for math).
+# These values satisfy ${policy_base_url} etc. interpolation in vllm_model.yaml.
+policy_base_url: http://127.0.0.1:8000/v1
+policy_api_key: placeholder
+policy_model_name: placeholder
