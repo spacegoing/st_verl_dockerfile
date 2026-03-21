@@ -1,9 +1,9 @@
 # Docker Compose for 2-node B300 verl training cluster
-# Nodes: b31 (10.12.11.5, head) + b32 (10.12.11.6, worker)
+# Nodes: b32 (10.12.11.6, Ray head) + b31 (10.12.11.5, Ray worker)
 #
 # Usage:
-#   Head node (b31):   docker compose up -d head
-#   Worker node (b32): docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker
+#   Head node (b32):   docker compose up -d head
+#   Worker node (b31): docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker
 #
 # Mount design:
 #   /mnt/public              → /public              (full shared fs)
@@ -45,7 +45,7 @@ x-common: &common
 
     # NCCL networking (B300 cluster: mlx5_10-17 are GPU-affine RoCE NICs)
     NCCL_SOCKET_IFNAME: bond0
-    NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_14:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
+    NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
     NCCL_IB_GID_INDEX: "3"
     NCCL_IB_TC: "138"
     NCCL_IB_QPS_PER_CONNECTION: "8"
@@ -106,7 +106,7 @@ services:
     command:
       - -c
       - >-
-        ray start --address=10.12.11.5:6379
+        ray start --address=10.12.11.6:6379
         --num-gpus=8 --num-cpus=64
         --node-ip-address=10.12.11.5
         && tail -f /dev/null

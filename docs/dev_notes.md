@@ -4,6 +4,228 @@ All changes to the Docker image, Dockerfile, and project infrastructure.
 
 ---
 
+## 2026-03-20/21: 2-Node Training — Debug & Fix (EP=16 GRPO, Moonlight-16B)
+
+### Goal
+
+Get 2-node Megatron GRPO training working on b32 (head, 10.12.11.6) + b31 (worker, 10.12.11.5)
+with EP=16 across 16 GPUs total. Script: `verl/my_scripts/run_moonlight_2node_blend_smoke.sh`.
+
+Four bugs had to be fixed before the first successful training step.
+
+---
+
+### Bug 1: NCCL `ibv_modify_qp` errno 22 on mlx5_14 (b31)
+
+**Symptom:**
+```
+ibv_modify_qp failed with 22 Invalid argument on dev mlx5_14:1, local GID index 3,
+local GID fe80::8c3d:8ff:fe64:7719
+```
+
+**Root cause:**
+
+`NCCL_IB_GID_INDEX=3` selects GID slot 3 for RoCEv2 (the IPv4-mapped routable address
+`::ffff:100.86.x.x`). On b32, mlx5_14's GID[3] is routable. But on **b31**, mlx5_14's GID[3]
+is `fe80::` (link-local — not routable cross-node). GID[4] on b31's mlx5_14 is routable, but
+we don't set GID_INDEX=4. All other NICs (mlx5_10-13, mlx5_15-17) have routable GID[3] on
+both nodes.
+
+Diagnosis: checked GID tables directly via
+`/sys/class/infiniband/<nic>/ports/1/gids/<index>` on both nodes.
+
+**Fix:** Exclude mlx5_14 from `NCCL_IB_HCA` in both places it's set:
+
+`docker-compose.yml`:
+```yaml
+NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
+```
+
+`verl/my_scripts/my_deepep_env.yaml`:
+```yaml
+NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
+```
+
+Note: `my_deepep_env.yaml` is the Ray runtime env — it propagates to all Ray workers on all
+nodes including b31. Both files must agree.
+
+---
+
+### Bug 2: RewardLoopWorker on b31 cannot connect to `localhost:2000x`
+
+**Symptom:**
+```
+Cannot connect to host localhost:20002 ssl:default [Multiple exceptions:
+[Errno 111] Connect call failed ('::1', 20002, 0, 0),
+[Errno 111] Connect call failed ('127.0.0.1', 20002)]
+```
+
+**Root cause:**
+
+Ray's `RewardLoopWorker` actors are scheduled on both b31 and b32. When actors on b31 try to
+hit `http://localhost:20001` etc., they try to connect to their local machine — but Gym servers
+only run on b32.
+
+**Fix:** Changed all reward server URLs in `run_moonlight_2node_blend_smoke.sh` from
+`localhost` to b32's explicit IP:
+
+```bash
++reward_model.reward_kwargs.server_urls.nemogym_code=http://10.12.11.6:20001 \
++reward_model.reward_kwargs.server_urls.nemogym_mcqa=http://10.12.11.6:20002 \
++reward_model.reward_kwargs.server_urls.nemogym_if=http://10.12.11.6:20003 \
++reward_model.reward_kwargs.server_urls.nemogym_structured=http://10.12.11.6:20004 \
++reward_model.reward_kwargs.server_urls.nemogym_workplace=http://10.12.11.6:20005 \
++reward_model.reward_kwargs.server_urls.nemogym_math=http://10.12.11.6:20006 \
+```
+
+---
+
+### Bug 3: Gym servers bound to `127.0.0.1` — unreachable from b31
+
+**Symptom:** Even after fixing the URL to `http://10.12.11.6:20001`, still getting:
+```
+Cannot connect to host 10.12.11.6:20001 ssl:default [Connect call failed ('10.12.11.6', 20001)]
+```
+
+**Diagnosis:** Checked `/proc/net/tcp` (hex parsing — `ss` unavailable):
+- Port 20001 bound to `0100007F:4E21` = `127.0.0.1:20001` (loopback only)
+- Gym servers were not reachable from any external IP.
+
+**Root cause:** `/opt/gym_config/gym_blend_servers.yaml` is baked into the Docker image.
+`nemo_gym/global_config.py` reads `DEFAULT_HOST_KEY_NAME` (`"default_host"`) from the YAML,
+falling back to `"127.0.0.1"`. The baked file has no `default_host` key, so all 7 uvicorn
+servers bound to loopback.
+
+Note: Tried passing `+default_host=0.0.0.0` as a CLI override to `ng_run` — this did NOT work.
+The `default_host` key must be in the actual YAML file.
+
+**Fix:** Add `default_host: "0.0.0.0"` to the YAML file before starting servers.
+
+Since the file is baked into the image (not on PFS), this patch must be re-applied after every
+container recreate. It is now **automated in `start_gym_uv.sh`** (idempotent — only patches if
+key is not already present):
+
+```bash
+GYM_CONFIG=/opt/gym_config/gym_blend_servers.yaml
+if ! grep -q 'default_host' "${GYM_CONFIG}" 2>/dev/null; then
+    sed -i '1a default_host: "0.0.0.0"' "${GYM_CONFIG}"
+fi
+```
+
+After patching, `/proc/net/tcp` shows `00000000:4E21` = `0.0.0.0:20001` — all interfaces.
+
+---
+
+### Bug 4: DeepEP/NVSHMEM flex dispatcher fails cross-node
+
+**Symptom:**
+```
+socketProgress: Connection closed by remote peer b31<42864>
+allgather of ipc handles failed
+nvshmem initialization failed, exiting
+Worker unexpectedly exits with a connection error code 2.
+```
+
+**Root cause:** `moe_token_dispatcher_type=flex` (DeepEP) requires NVSHMEM for cross-node
+expert routing. NVSHMEM uses a UID socket bootstrap to establish IB RDMA connections
+between nodes. This bootstrap fails on this cluster — the UID socket connection from b32
+is refused/closed by b31 before IB handles can be exchanged.
+
+**Fix:** Switched MoE dispatcher from `flex` (DeepEP/NVSHMEM) to `alltoall` (NCCL-based):
+
+```bash
++actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=False \
++actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall \
+```
+
+`alltoall` uses NCCL all-to-all for expert token routing — works over the same IB RoCEv2 links
+(mlx5_10-13, mlx5_15-17) that are already working for NCCL. Performance is slightly lower than
+DeepEP flex but fully functional cross-node.
+
+**Known limitation:** DeepEP `flex` dispatcher (NVSHMEM IB bootstrap) not working on this
+cluster. Root cause not fully diagnosed — likely requires NVSHMEM IB bootstrap configuration
+(`NVSHMEM_BOOTSTRAP=IB` or proper UID socket routing between nodes).
+
+---
+
+### Ray GCS session mismatch (encountered during debugging)
+
+During aggressive debugging, killing processes on ports 20001-20007 with `fuser` also killed
+Ray head's gcs_server/raylet (they happened to be using ports in that range). This left the
+Ray cluster in a broken state with orphaned GCS state at `/tmp/ray_gym`.
+
+**Fix:** Full container recreate:
+```bash
+docker rm -f vrl
+docker compose up -d head   # on b32
+docker rm -f vrl
+docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker  # on b31
+```
+
+Lesson: Do not use `fuser -k` on port ranges. Kill processes by PID or name to avoid
+accidentally killing Ray infrastructure.
+
+---
+
+### Working Configuration (as of 2026-03-20)
+
+**Parallelism:** `NNODES=2`, `EP=16`, `gen_tp=1`, `train_tp=1`, `train_pp=1`
+
+**MoE dispatch:** `alltoall` + `moe_enable_deepep=False` (not flex/NVSHMEM)
+
+**NCCL NICs:** `mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1`
+(mlx5_14 excluded — b31 GID[3] is link-local)
+
+**Reward URLs:** `http://10.12.11.6:2000x` (explicit b32 IP, not localhost)
+
+**Gym bind:** `default_host: "0.0.0.0"` — auto-patched by `start_gym_uv.sh` on startup
+
+**Training launch:**
+```bash
+# On b32
+cd /mnt/public/lichang93/st_verl_dockerfile
+docker rm -f vrl 2>/dev/null || true
+docker compose up -d head
+
+# On b31
+docker rm -f vrl 2>/dev/null || true
+docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker
+
+# Back on b32: verify 2 nodes visible
+docker exec vrl ray status
+
+# Start Gym + training (handles gym config patch automatically)
+docker exec vrl bash /root/myCodeLab/host/verl/my_scripts/run_moonlight_2node_blend_smoke.sh
+```
+
+**Step 1 metrics (first successful 2-node run):**
+```
+actor/pg_loss: 0.1501 → 0.0945 (step 32)
+actor/grad_norm: 10.59
+perf/max_memory_allocated_gb: 199.4 GB (b32, ~200 GB per node)
+perf/throughput: 7.99 tokens/s (step 1), 11.36 tokens/s (step 2)
+timing_s/step: 281s
+```
+
+Val acc at step 0 (baseline before any training):
+```
+workplace: 0.143, mcqa: 0.037, if: 0.038, code: 0.000, structured: 0.000
+```
+
+---
+
+### Files Changed (2-node fix)
+
+| File | Change |
+|------|--------|
+| `docker-compose.yml` | `NCCL_IB_HCA`: removed `mlx5_14` |
+| `verl/my_scripts/my_deepep_env.yaml` | `NCCL_IB_HCA`: removed `mlx5_14` |
+| `verl/my_scripts/run_moonlight_2node_blend_smoke.sh` | Reward URLs: `localhost` → `http://10.12.11.6:2000x`; dispatcher: `flex` → `alltoall`, `moe_enable_deepep`: `True` → `False` |
+| `verl/my_scripts/start_gym_uv.sh` | Auto-patch `gym_blend_servers.yaml` with `default_host: "0.0.0.0"` (idempotent); renumbered steps 2→2, 3→3, 4→4 |
+| `CLAUDE.md` | Added §6.2 (2-node training), §10 entries for all 4 bugs |
+
+---
+
 ## 2026-03-20: Fix Docker Push — Switch to `docker buildx build --push`
 
 ### Problem
