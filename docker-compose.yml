@@ -36,6 +36,7 @@ x-common: &common
     - /mnt/public:/public
     - /mnt/public/lichang93/st_verl_dockerfile:/root/myCodeLab/host
     - /mnt/public/lichang93/downloads:/root/myCodeLab/host/downloads
+    - /root/.ssh:/root/.ssh:ro
   environment:
     # Core
     CUDA_DEVICE_MAX_CONNECTIONS: "1"
@@ -44,8 +45,9 @@ x-common: &common
     VLLM_ATTENTION_BACKEND: "CUTLASS_MLA"
 
     # NCCL networking (B300 cluster: mlx5_10-17 are GPU-affine RoCE NICs)
+    # mlx5_14 previously excluded due to b31 GID[3]=fe80:: (link-local) misconfiguration — now fixed by admin
     NCCL_SOCKET_IFNAME: bond0
-    NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
+    NCCL_IB_HCA: "mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_14:1,mlx5_15:1,mlx5_16:1,mlx5_17:1"
     NCCL_IB_GID_INDEX: "3"
     NCCL_IB_TC: "138"
     NCCL_IB_QPS_PER_CONNECTION: "8"
@@ -56,6 +58,9 @@ x-common: &common
     NVSHMEM_IBGDA_NIC_HANDLER: gpu
     NVSHMEM_IB_TRAFFIC_CLASS: "138"
     NVSHMEM_IB_ENABLE_IBGDA: "1"
+    NVSHMEM_IB_GID_INDEX: "3"
+    NVSHMEM_HCA_LIST: "mlx5_10,mlx5_11,mlx5_12,mlx5_13,mlx5_14,mlx5_15,mlx5_16,mlx5_17"
+    NVSHMEM_IBGDA_ENABLE_MULTI_PORT: "1"
 
     # Transformer Engine
     NVTE_FUSED_ATTN: "1"

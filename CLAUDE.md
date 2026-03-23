@@ -2,7 +2,10 @@
 
 ## 1. Project Overview
 
-This repo builds and operates Docker images for **Moonlight-16B GRPO training** using the verl RL training framework on a 2-node B300 SXM6 cluster.
+This repo builds and operates Docker images for **40Bra (40B) and Moonlight-16B GRPO training** using the verl RL training framework. Primary target is the **32-node B300 cluster via KubeRay** (k8s); baremetal 2-node B300 SXM6 is used for smoke tests and development.
+
+> **K8s training docs**: `iter_kuberay_32nodes_verl_training/training_plan.md` — stage-by-stage progression, script layout, and all k8s-specific bugs/fixes.
+> **Current active run**: Stage 7 — 40Bra 32-node multi-domain Gym training (256 GPUs, nemogym_server reward).
 
 ### Two-Image Architecture
 
@@ -205,7 +208,7 @@ docker exec vrl bash /root/myCodeLab/host/verl/my_scripts/start_gym_uv.sh --stop
 
 1. Kills any stale processes on port 6380 and wipes `/tmp/ray_gym` (prevents session mismatch).
 2. Starts an isolated Ray head on port 6380 with ports fixed in the 7300-7999 range (outside verl's 10002-19999 worker range, no dashboard to save ~1.1 GB RAM).
-3. Patches `/opt/gym_config/gym_blend_servers.yaml` to add `default_host: "0.0.0.0"` (idempotent). This makes uvicorn bind on all interfaces so cross-node Ray workers on b31 can reach the reward servers on b32. The file is baked into the image with no `default_host` key, which would otherwise cause servers to bind `127.0.0.1` and be unreachable from b31.
+3. Patches `/opt/gym_config/gym_blend_servers.yaml` to add `default_host: "0.0.0.0"` (idempotent). The file is baked into the image with no `default_host` key, so uvicorn defaults to binding `127.0.0.1` (loopback only). The patch makes servers reachable from external machines (e.g. cross-node monitoring: `curl http://10.12.11.5:20001/` from b32). Reward workers use `localhost` URLs and work with either binding — this is for observability, not correctness.
 4. Launches all 7 Gym resource servers via `ng_run` using `/opt/gym_config/gym_blend_servers.yaml`.
 5. Polls all 7 ports (20001-20007) until healthy (timeout: 120s).
 
@@ -265,17 +268,29 @@ tail -f logs/blend_smoke_<TIMESTAMP>.log
 docker exec vrl bash /root/myCodeLab/host/verl/my_scripts/run_moonlight_2node_blend_smoke.sh
 ```
 
-The script calls `start_gym_uv.sh` automatically, which now also patches the Gym config
-for cross-node access (see Section 5 "What it does", item 3). No manual pre-steps needed.
+The script starts Gym servers on **both nodes** in parallel (pdsh to b31), then submits the Ray job.
+No manual pre-steps needed.
 
 **Key parameters vs 1-node:**
 - `train_prompt_bsz=16` (doubled), `EP=16` (all 16 GPUs), `NNODES=2`
-- Reward URLs: `http://10.12.11.6:2000x` (b32 IP — not localhost, workers run on b31 too)
+- Reward URLs: `http://localhost:2000x` — each node runs its own Gym, reward workers hit localhost
 - MoE dispatcher: `alltoall` + `moe_enable_deepep=False` (NVSHMEM/DeepEP flex not working cross-node)
 
 **2-node NCCL constraints:**
 - `NCCL_IB_HCA` excludes `mlx5_14` — b31's GID[3] on mlx5_14 is link-local (`fe80::`), not routable. Using mlx5_10-13, mlx5_15-17 (7 NICs, all with routable GID[3] on both nodes).
 - Set in both `docker-compose.yml` (container-level) and `my_deepep_env.yaml` (Ray worker-level).
+
+**Dual Ray cluster isolation (per node):**
+- Port 6379 — verl Ray (cross-node, 2 nodes, 16 GPUs total)
+- Port 6380 — Gym Ray (local-only, 1 node per host, isolated via `--temp-dir=/tmp/ray_gym`)
+- Each node has its own Gym Ray; reward workers hit `localhost:2000x` — never cross-node for reward
+
+**Verify dual cluster status:**
+```bash
+docker exec vrl ray status                                               # verl Ray: 2 nodes
+docker exec vrl /opt/gym_venvs/main/bin/ray status --address=127.0.0.1:6380  # gym Ray: 1 node
+pdsh -w b31 "docker exec vrl /opt/gym_venvs/main/bin/ray status --address=127.0.0.1:6380"  # b31 gym: 1 node
+```
 
 **Check Ray job progress:**
 
@@ -490,25 +505,15 @@ local GID fe80::8c3d:8ff:fe64:7719
 mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1
 ```
 
-### 2-node: RewardLoopWorker on b31 can't connect to reward servers
+### 2-node: Gym servers not started on b31
 
 **Symptom:** `Cannot connect to host localhost:20002 ... [Errno 111] Connect call failed`
 
-**Cause:** Ray's `RewardLoopWorker` actors land on both b31 and b32. b31 has no Gym servers, so `localhost:2000x` fails on b31.
+**Cause:** `RewardLoopWorker` actors are scheduled round-robin on all verl Ray nodes (`reward_loop.py:248-260`). Workers land on both b31 and b32. Each worker hits `localhost:2000x` on its own node — b31 had no Gym servers running.
 
-**Fix:** Reward server URLs in `run_moonlight_2node_blend_smoke.sh` use `http://10.12.11.6:2000x` (b32 explicit IP).
+**Fix:** `run_moonlight_2node_blend_smoke.sh` now starts Gym on both nodes in parallel using pdsh. SSH keys are mounted into the container via `docker-compose.yml` (`/root/.ssh:/root/.ssh:ro`) so pdsh can reach b31. Reward URLs stay `localhost:2000x`.
 
-### 2-node: Gym servers bound to 127.0.0.1 — unreachable from b31
-
-**Symptom:** Even with correct b32 IP in URLs: `Connect call failed ('10.12.11.6', 20001)`
-
-**Cause:** `/opt/gym_config/gym_blend_servers.yaml` in the image has no `default_host` key. `nemo_gym/global_config.py` defaults to `127.0.0.1`. Note: passing `+default_host=0.0.0.0` as a CLI arg to `ng_run` does NOT work — the key must be in the YAML.
-
-**Fix:** `start_gym_uv.sh` now auto-patches the YAML before launching servers (idempotent):
-```bash
-sed -i '1a default_host: "0.0.0.0"' /opt/gym_config/gym_blend_servers.yaml
-```
-No manual action needed.
+Note: `default_host: "0.0.0.0"` is auto-patched by `start_gym_uv.sh` (harmless, kept for external monitoring access).
 
 ### 2-node: DeepEP/NVSHMEM flex dispatcher fails cross-node
 
