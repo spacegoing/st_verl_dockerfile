@@ -104,6 +104,32 @@ RUN apt-get update && apt-get install -y pdsh tmux htop vim && \
 COPY mbridge /tmp/mbridge
 RUN cd /tmp/mbridge && uv pip install --no-cache --no-deps . && rm -rf /tmp/mbridge
 
+# ── Patch fused_a2a.py: force allow_nvlink_for_normal_mode=False ─────────────
+# Root cause: multi-node EP (EP=16 across 2 nodes, 8 GPUs each) uses a 16-rank
+# process group. With allow_nvlink_for_normal_mode=True (default), DeepEP sets
+# disable_nvlink_for_normal_mode=False, which makes nvshmem_rank=rdma_rank.
+# With EP=16 / NUM_MAX_NVL_PEERS=8, rdma_rank is 0 or 1, so all 8 processes
+# on each node share the same NVSHMEM rank (violates 1-process-per-PE).
+# This causes DCT QP initialization collisions: ibgda.cpp "create DCT share err"
+# → worker process dies.
+# Fix: allow_nvlink_for_normal_mode=False forces disable_nvlink_for_normal_mode=True,
+# so each of the 16 processes gets unique nvshmem_rank (0-15), matching the
+# standalone DeepEP test which passes. Intranode dispatch uses IB (minor perf cost).
+# Also force num_nvl_bytes=0 to avoid nvl buffer allocation with disable_nvlink=True.
+RUN python3 -c "\
+path = '/opt/Megatron-Bridge/3rdparty/Megatron-LM/megatron/core/transformer/moe/fused_a2a.py'; \
+content = open(path).read(); \
+old_nvl = '        num_nvl_bytes = max(\n            config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes\n        )\n'; \
+new_nvl = '        # num_nvl_bytes skipped: nvl>0 not needed when allow_nvlink_for_normal_mode=False\n'; \
+old_buf = '        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)\n'; \
+new_buf = '        # allow_nvlink_for_normal_mode=False: disable_nvlink_for_normal_mode=True gives each\n        # of 16 EP processes unique NVSHMEM rank (0-15), prevents DCT collision in ibgda.cpp\n        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes, allow_nvlink_for_normal_mode=False)\n'; \
+assert old_nvl in content, f'nvl patch not found'; \
+assert old_buf in content, f'buf patch not found'; \
+content = content.replace(old_nvl, new_nvl).replace(old_buf, new_buf); \
+open(path, 'w').write(content); \
+print('fused_a2a patched OK') \
+"
+
 # ── Layer 7: Static config files ─────────────────────────────────────────────
 COPY docker_assets/o200k_base.tiktoken docker_assets/to_append.sh docker_assets/.tmux.conf /tmp/docker_context/
 COPY docker_assets/nltk_data /usr/local/share/nltk_data

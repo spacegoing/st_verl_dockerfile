@@ -38,13 +38,28 @@ Registry: `registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl`
 
 ## 2. Container Lifecycle Rules
 
-### Golden rule: always rm+recreate
+### Golden rule: ALWAYS use a fresh container — never reuse
 
-Never reuse a stale container. Always stop, remove, then recreate:
+**Every training run, every Gym restart, every time: down+up the container. No exceptions.**
+
+Reusing a live container across runs causes internal state (Ray sessions, stale processes, log files) to accumulate and corrupt. Lesson learned: a `vrl` container left running for 3 days while `start_gym_uv.sh` was called repeatedly inside it accumulated 2.1TB of Ray log spam from orphaned `gcs_server`/`raylet` processes — filling the entire 3.4TB local disk and breaking the PFS mount.
+
+A fresh container costs nothing (seconds to recreate) and eliminates an entire class of hard-to-diagnose bugs.
 
 ```bash
-docker rm -f vrl
-docker compose up -d head   # on b32
+cd /mnt/public/lichang93/st_verl_dockerfile
+docker compose down && docker compose up -d head   # on b32
+```
+
+Use `docker compose down` (not `docker rm -f vrl`) — `down` also cleans up the compose-managed network, whereas `rm -f` leaves it behind.
+
+**On b31 too — always recreate both nodes before a 2-node run:**
+```bash
+# b32:
+docker compose down && docker compose up -d head
+# b31:
+docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml down && \
+docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker
 ```
 
 ### vrl and gym_pass are mutually exclusive
@@ -54,8 +69,7 @@ Both containers use `network_mode: host` and both bind **port 6380** (Gym's isol
 **Before starting `vrl` (if `gym_pass` was running):**
 
 ```bash
-docker stop gym_pass
-docker rm -f gym_pass
+docker compose -f gym_rollout/docker-compose.yml down
 # Kill any Ray processes still holding port 6380 on the host (they survive container stops)
 fuser -k -9 6380/tcp 2>/dev/null || true
 rm -rf /tmp/ray_gym
@@ -64,7 +78,7 @@ rm -rf /tmp/ray_gym
 **Before starting `gym_pass` (if `vrl` was running):**
 
 ```bash
-docker rm -f vrl
+docker compose down
 fuser -k -9 6380/tcp 2>/dev/null || true
 rm -rf /tmp/ray_gym
 ```
@@ -78,6 +92,30 @@ AssertionError: Session name X does not match persisted value Y
 ```
 
 Fix: always `rm -rf /tmp/ray_gym` before starting any container that launches the Gym Ray cluster. `start_gym_uv.sh` does this automatically on startup.
+
+### Gym Ray log disk exhaustion ("Wrong cluster ID token" spam)
+
+**Root cause: reusing a container across multiple training runs.** This should not happen if you follow the golden rule (rm+recreate every time). The accumulation only occurs when `start_gym_uv.sh` is called repeatedly inside a long-lived container without a full container restart.
+
+**Symptom:** `/tmp/ray_gym/session_.../logs/raylet.out` and `gcs_server.out` grow to hundreds of GB or more, filling local disk. Each line is:
+```
+(gcs_server) server_call.h:228: Wrong cluster ID token in request! Expected: X, but got: Y
+```
+
+**Mechanism:** `pkill -9 -f /opt/gym_venvs` kills the Gym server actors but NOT `gcs_server`/`raylet` (Ray internals that live in Ray's own venv). Orphaned processes from old sessions spam the new GCS at ~GB/hour with no rate limiting.
+
+**Prevention: just recreate the container.** All processes die on `docker compose down`.
+
+**Defense-in-depth fix (applied in `start_gym_uv.sh`):** Added `pkill -9 -f "${GYM_RAY_TEMP}"` to also kill Ray internals by their temp-dir path — catches `gcs_server`/`raylet` regardless of venv.
+
+**Manual recovery** (if disk already full):
+```bash
+docker exec vrl pkill -9 -f gcs_server
+docker exec vrl pkill -9 -f raylet
+docker exec vrl pkill -9 -f /opt/gym_venvs
+docker exec vrl pkill -9 -f /tmp/ray_gym
+docker exec vrl rm -rf /tmp/ray_gym
+```
 
 ---
 
@@ -158,8 +196,7 @@ The `vrl` container is the Ray head node for verl training. It starts Ray and ke
 
 ```bash
 cd /mnt/public/lichang93/st_verl_dockerfile
-docker rm -f vrl 2>/dev/null || true
-docker compose up -d head
+docker compose down && docker compose up -d head
 ```
 
 This starts Ray with `--head --port=6379 --node-ip-address=10.12.11.6`.
@@ -167,7 +204,7 @@ This starts Ray with `--head --port=6379 --node-ip-address=10.12.11.6`.
 ### On b31 (worker node, 2-node setup only)
 
 ```bash
-docker rm -f vrl 2>/dev/null || true
+docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml down && \
 docker compose -f /mnt/public/lichang93/st_verl_dockerfile/docker-compose.yml up -d worker
 ```
 
@@ -265,20 +302,20 @@ tail -f logs/blend_smoke_<TIMESTAMP>.log
 **Launch (from b32, outside container):**
 
 ```bash
-docker exec vrl bash /root/myCodeLab/host/verl/my_scripts/run_moonlight_2node_blend_smoke.sh
+docker exec vrl bash /root/myCodeLab/host/verl/my_scripts/run_multi_domain.sh
 ```
 
-The script starts Gym servers on **both nodes** in parallel (pdsh to b31), then submits the Ray job.
-No manual pre-steps needed.
+The script starts Gym on the head node locally, then dispatches `start_gym_uv.sh` to all worker nodes via Ray remote tasks (`start_gym_all_nodes.py`) — same pattern as k8s. No SSH/pdsh dependency.
 
 **Key parameters vs 1-node:**
 - `train_prompt_bsz=16` (doubled), `EP=16` (all 16 GPUs), `NNODES=2`
 - Reward URLs: `http://localhost:2000x` — each node runs its own Gym, reward workers hit localhost
-- MoE dispatcher: `alltoall` + `moe_enable_deepep=False` (NVSHMEM/DeepEP flex not working cross-node)
+- MoE dispatcher: `alltoall` + `moe_enable_deepep=False` (DeepEP/NVSHMEM not used cross-node; see Known Issues)
+- `NVSHMEM_BOOTSTRAP=IB` still in `my_deepep_env.yaml` — kept for potential future DeepEP use
 
-**2-node NCCL constraints:**
-- `NCCL_IB_HCA` excludes `mlx5_14` — b31's GID[3] on mlx5_14 is link-local (`fe80::`), not routable. Using mlx5_10-13, mlx5_15-17 (7 NICs, all with routable GID[3] on both nodes).
-- Set in both `docker-compose.yml` (container-level) and `my_deepep_env.yaml` (Ray worker-level).
+**2-node NCCL config (all 8 NICs, mlx5_14 fixed by admin):**
+- `NCCL_IB_HCA: mlx5_10-17` (all 8 NICs, GID[3] routable on both nodes)
+- Set in both `docker-compose.yml` (container-level) and `my_deepep_env.yaml` (Ray worker-level)
 
 **Dual Ray cluster isolation (per node):**
 - Port 6379 — verl Ray (cross-node, 2 nodes, 16 GPUs total)
@@ -287,9 +324,9 @@ No manual pre-steps needed.
 
 **Verify dual cluster status:**
 ```bash
-docker exec vrl ray status                                               # verl Ray: 2 nodes
-docker exec vrl /opt/gym_venvs/main/bin/ray status --address=127.0.0.1:6380  # gym Ray: 1 node
-pdsh -w b31 "docker exec vrl /opt/gym_venvs/main/bin/ray status --address=127.0.0.1:6380"  # b31 gym: 1 node
+docker exec vrl ray status                                                    # verl Ray: 2 nodes
+docker exec vrl /opt/gym_venvs/main/bin/ray status --address=127.0.0.1:6380  # b32 gym: 1 node
+ssh b31 "docker exec vrl /opt/gym_venvs/main/bin/ray status --address=127.0.0.1:6380"  # b31 gym: 1 node
 ```
 
 **Check Ray job progress:**
@@ -330,11 +367,11 @@ These tests use the `gym_pass` container, which is mutually exclusive with `vrl`
 
 ```bash
 # Must not have vrl running — stop it first
-docker rm -f vrl 2>/dev/null || true
+cd /mnt/public/lichang93/st_verl_dockerfile
+docker compose down
 fuser -k -9 6380/tcp 2>/dev/null || true
 rm -rf /tmp/ray_gym
 
-cd /mnt/public/lichang93/st_verl_dockerfile
 docker compose -f gym_rollout/docker-compose.yml up -d
 docker exec -it gym_pass bash
 ```
@@ -443,7 +480,7 @@ Variables set in `my_deepep_env.yaml` (Ray runtime env, propagated to all Ray wo
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Required for Megatron tensor parallelism |
 | `HYDRA_FULL_ERROR` | `1` | Full Hydra config error output |
 | `OTEL_SDK_DISABLED` | `true` | Disable OpenTelemetry SDK |
-| `NVSHMEM_IBGDA_NIC_HANDLER` | `gpu` | DeepEP: use GPU-side NIC handler |
+| `NVSHMEM_IBGDA_NIC_HANDLER` | `cpu_host_memory` | DeepEP: IBRC QPs (not DCT) — this cluster's IB fabric doesn't support DCT |
 
 **Note:** `working_dir` is NOT set in `my_deepep_env.yaml`. verl is installed as an editable package pointing to the PFS mount (`/root/myCodeLab/host/verl`), which is accessible from all cluster nodes via the shared filesystem. Packaging a working_dir tarball would be redundant and slow.
 
@@ -458,15 +495,26 @@ Variables set in `my_deepep_env.yaml` (Ray runtime env, propagated to all Ray wo
 AssertionError: Session name X does not match persisted value Y
 ```
 
-**Cause:** `/tmp/ray_gym` contains stale session state from a previous container. With `network_mode: host`, Ray processes can survive container restarts and leave state on the host.
+**Cause:** Gym Ray processes survive container restarts (host network mode). `fuser -k -9 6380/tcp` only kills the port holder; other gym Ray processes (GCS clients, monitor, worker agents) keep GCS session data in memory. When a new `ray start --head` tries to write a new session to the GCS, it finds the old session already stored → mismatch.
 
-**Fix:** Always wipe before starting:
+**Fix:** `start_gym_uv.sh` now kills ALL gym venv processes, not just the port holder:
 ```bash
+pkill -9 -f /opt/gym_venvs 2>/dev/null || true
 fuser -k -9 6380/tcp 2>/dev/null || true
+sleep 2
 rm -rf /tmp/ray_gym
 ```
 
-`start_gym_uv.sh` does this automatically at startup.
+For manual recovery (if session mismatch occurs despite the above):
+```bash
+# Preferred: full container cycle
+cd /mnt/public/lichang93/st_verl_dockerfile
+docker compose down
+fuser -k -9 6380/tcp 2>/dev/null || true
+rm -rf /tmp/ray_gym
+docker compose up -d head
+docker exec vrl bash /root/myCodeLab/host/verl/my_scripts/gym/start_gym_uv.sh
+```
 
 ### PFS pyc cache accumulation
 
@@ -490,47 +538,54 @@ rm -rf /tmp/ray_gym
 
 **Fix:** Only one of `vrl` or `gym_pass` can run at a time. Stop and remove the other before starting. See Section 2 for exact commands.
 
-### 2-node: NCCL `ibv_modify_qp` errno 22 on mlx5_14
-
-**Symptom:**
-```
-ibv_modify_qp failed with 22 Invalid argument on dev mlx5_14:1, local GID index 3,
-local GID fe80::8c3d:8ff:fe64:7719
-```
-
-**Cause:** b31's mlx5_14 GID[3] is `fe80::` (link-local), not a routable RoCEv2 address. All other NICs have routable GID[3] on both nodes.
-
-**Fix:** `NCCL_IB_HCA` excludes `mlx5_14` in both `docker-compose.yml` and `my_deepep_env.yaml`:
-```
-mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_15:1,mlx5_16:1,mlx5_17:1
-```
-
 ### 2-node: Gym servers not started on b31
 
 **Symptom:** `Cannot connect to host localhost:20002 ... [Errno 111] Connect call failed`
 
-**Cause:** `RewardLoopWorker` actors are scheduled round-robin on all verl Ray nodes (`reward_loop.py:248-260`). Workers land on both b31 and b32. Each worker hits `localhost:2000x` on its own node — b31 had no Gym servers running.
+**Cause:** `RewardLoopWorker` actors land on all verl Ray nodes (round-robin). Each hits `localhost:2000x` on its own node. If b31 Gym is not running, b31 workers fail.
 
-**Fix:** `run_moonlight_2node_blend_smoke.sh` now starts Gym on both nodes in parallel using pdsh. SSH keys are mounted into the container via `docker-compose.yml` (`/root/.ssh:/root/.ssh:ro`) so pdsh can reach b31. Reward URLs stay `localhost:2000x`.
+**Fix:** `run_multi_domain.sh` now starts Gym on all nodes via Ray remote tasks (`start_gym_all_nodes.py`) — same pattern as k8s. No SSH/pdsh dependency. Head starts locally, workers via Ray `NodeAffinitySchedulingStrategy`.
 
-Note: `default_host: "0.0.0.0"` is auto-patched by `start_gym_uv.sh` (harmless, kept for external monitoring access).
+### 2-node: NVSHMEM IBGDA DCT failure (DeepEP flex cross-node) — FULLY FIXED
 
-### 2-node: DeepEP/NVSHMEM flex dispatcher fails cross-node
+There are two layered issues, both fixed permanently in `Dockerfile.base`:
 
-**Symptom:**
-```
-allgather of ipc handles failed
-nvshmem initialization failed, exiting
-```
+#### Layer 1: NVSHMEM IBGDA NIC handler
 
-**Cause:** `moe_token_dispatcher_type=flex` requires NVSHMEM IB bootstrap for cross-node expert routing. NVSHMEM UID socket bootstrap fails on this cluster.
+**Symptom:** Step 1 crashes with `create DCT share err` / `Unable to create ah`.
 
-**Fix:** Use `alltoall` dispatcher instead:
-```bash
-+actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=False
-+actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=alltoall
-```
-Already set in `run_moonlight_2node_blend_smoke.sh`. Do not switch to `flex` without first diagnosing NVSHMEM bootstrap.
+**Cause:** Default `NVSHMEM_IBGDA_NIC_HANDLER=gpu` uses DCT QPs. This cluster doesn't support DCT.
+
+**Fix:** `NVSHMEM_IBGDA_NIC_HANDLER: cpu_host_memory` in both `docker-compose.yml` and `my_deepep_env.yaml`. Already set — do not change.
+
+#### Layer 2: NCCL/NVSHMEM IB resource conflict in Megatron (UNRESOLVED — using alltoall instead)
+
+**Symptom:** Step 1 crashes with `ibgda.cpp:2966: non-zero status: 7 create DCT share err` even with `NVSHMEM_IBGDA_NIC_HANDLER=cpu_host_memory`. Happens at first MoE dispatch (`compute_log_prob`), not during initialization.
+
+**Root cause:** NCCL initializes IB RC QPs for all EP workers (16 processes × 8 NICs × 8 QPs/connection = many QPs). When DeepEP `Buffer()` is created lazily at step 1, it calls `sync()` → `nvshmemx_init_attr(IBGDA)`. IBGDA transport initialization requires DCT QP creation on the IB fabric, but IB resources (DCT QP table or context) are exhausted/blocked by NCCL's existing connections → status 7 (EPERM/resource limit).
+
+The standalone DeepEP test PASSES because it starts fresh torchrun processes with NO NCCL initialized — there are no competing IB resources.
+
+Additionally, `buffer.py` forcefully sets `os.environ['NVSHMEM_IB_ENABLE_IBGDA'] = '1'` before NVSHMEM init, so there's no way to disable IBGDA without patching `buffer.py`.
+
+**Partial fix applied** (in Dockerfile.base and both containers):
+- `fused_a2a.py`: `allow_nvlink_for_normal_mode=False` → unique NVSHMEM ranks per process
+- `fused_a2a.py`: `num_nvl_bytes=0` → no NVLink buffer allocation
+- These prevent bootstrap_uid truncation errors but do NOT prevent the DCT failure (different failure mode)
+
+**Working config (CONFIRMED 2026-03-23):** Use `alltoall` dispatcher (`moe_token_dispatcher_type=alltoall`, `moe_enable_deepep=False`). NVSHMEM is not used, NCCL handles MoE alltoall. Step 1 verified: `actor/grad_norm:8.39`, `timing_s/step:342s` (~5.7 min/step), no DCT errors. Performance penalty vs DeepEP flex is acceptable for smoke tests.
+
+**Future DeepEP flex enablement:** Pre-initialize DeepEP Buffer BEFORE NCCL initialization in the Megatron worker startup (not lazily). This would avoid the IB resource conflict. Requires Megatron-Bridge code changes.
+
+**Verification:** Standalone `bash verl/my_scripts/run_deepep_test.sh cpu` passes — NVSHMEM/IBGDA works when NCCL is not competing.
+
+### 2-node: NVSHMEM bootstrap failure (DeepEP flex cross-node)
+
+**Symptom:** Workers hang silently after `WorkerDict` actor init (no output, GPUs idle).
+
+**Cause:** Default NVSHMEM bootstrap (`UID` socket) requires a shared `/tmp` between nodes — fails cross-node. IB bootstrap is needed.
+
+**Fix:** `NVSHMEM_BOOTSTRAP: "IB"` in `my_deepep_env.yaml`. Already set — do not remove.
 
 ### Aliyun push fails through proxy
 

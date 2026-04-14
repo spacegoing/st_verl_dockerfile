@@ -55,7 +55,7 @@ x-common: &common
     NCCL_RUNTIME_CONNECT: "0"
 
     # NVSHMEM / DeepEP
-    NVSHMEM_IBGDA_NIC_HANDLER: gpu
+    NVSHMEM_IBGDA_NIC_HANDLER: cpu_host_memory
     NVSHMEM_IB_TRAFFIC_CLASS: "138"
     NVSHMEM_IB_ENABLE_IBGDA: "1"
     NVSHMEM_IB_GID_INDEX: "3"
@@ -68,6 +68,7 @@ x-common: &common
     # Ray
     RAY_USAGE_STATS_ENABLED: "0"
     RAY_ENABLE_OPENTELEMETRY: "0"
+    OTEL_SDK_DISABLED: "true"
     TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
 
     # Python pyc cache — redirect to local /tmp to avoid PFS write pressure
