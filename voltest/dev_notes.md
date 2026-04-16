@@ -312,3 +312,63 @@ Consistent rates across pods confirm all 80 pods were actually doing real GPU wo
 deadlock class that caused March Incidents A/B/C in real verl training.**
 
 See `summary.md` for the headline report.
+
+## 2026-04-16 06:20 UTC — Consolidation: one yaml + one pipeline script
+
+User feedback: "we have to use several yamls with diff names to submit, pls
+change this to one yaml and make a pipeline / workflow without bloating yaml dir."
+
+### Changes
+
+1. **Deleted 10 per-job yamls.** Previously `launch.sh` wrote `generated-voltest-{0..9}.yaml`
+   to `yaml/` before applying. Now: template rendered on stdin, piped directly to
+   `kubectl apply -f -`. Zero per-job files on disk.
+2. **Renamed `voltest-rayjob-template.yaml` → `rayjob.yaml`.** Single source of truth.
+3. **Added `__DURATION_S__` placeholder** in the yaml so pipeline can set runtime per invocation.
+4. **Deleted `launch.sh` and `collect_logs.sh`.** Both are subsumed by the new pipeline script.
+5. **Added `run_pipeline.sh`** — one script with 6 phases:
+   - phase 1: preflight (check kubectl, cluster idle, template exists)
+   - phase 2: submit (sed | kubectl apply -f - for each of N jobs)
+   - phase 3+4: watch + auto-cleanup terminal jobs; block until all N are gone
+   - phase 5: verify PFS logs contain 8×DONE markers per job
+   - phase 6: report wall clock + log file locations
+6. **Kept `monitor.sh`** for ad-hoc one-shot status probes.
+
+### Validation
+
+Dry-run check:
+```bash
+sed -e 's/__JOBNAME__/voltest-dryrun/g' -e 's/__DURATION_S__/60/g' yaml/rayjob.yaml \
+    | kubectl apply --dry-run=client -f -
+# → rayjob.ray.io/voltest-dryrun created (dry run)
+```
+Rendered yaml passes client-side validation. Submit path is cleaner than before.
+
+### New usage
+
+```bash
+# Default: 10 jobs, 5-min runs
+./run_pipeline.sh
+
+# Shorter smoke test: 3 jobs, 1-min runs
+N=3 DURATION_S=60 ./run_pipeline.sh
+
+# Verify-only (skip submit; useful after manual submission for forensics)
+SKIP_SUBMIT=1 ./run_pipeline.sh
+```
+
+### Final tree
+```
+voltest/
+├── dev_notes.md
+├── gpu_burn.py
+├── monitor.sh
+├── plan.md
+├── run_pipeline.sh
+├── summary.md
+├── yaml/
+│   └── rayjob.yaml              ← the only yaml
+└── logs/
+    ├── voltest-N.log            ← per-job PFS logs (persist across runs)
+    └── pipeline-<ts>.log        ← operational log per pipeline invocation
+```

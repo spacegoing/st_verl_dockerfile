@@ -10,8 +10,8 @@
 Total demand: 10 × 8 = **80 pods on a 31-node cluster** — gang-scheduling hard stress test.
 
 - Ray app: [`gpu_burn.py`](gpu_burn.py) — dispatches 8 parallel `@ray.remote(num_gpus=8)` tasks, each running 5 min of `torch.matmul` on 8 GPUs.
-- RayJob yaml: [`yaml/voltest-rayjob-template.yaml`](yaml/voltest-rayjob-template.yaml) — 1 head + 7 workers (minMember=8), whole-node resource sizing.
-- Submission: [`launch.sh`](launch.sh).
+- RayJob yaml: [`yaml/rayjob.yaml`](yaml/rayjob.yaml) — 1 head + 7 workers (minMember=8), whole-node resource sizing. Single source of truth with `__JOBNAME__` / `__DURATION_S__` placeholders.
+- Pipeline: [`run_pipeline.sh`](run_pipeline.sh) — one script: preflight → submit (streamed, no per-job files on disk) → watch+auto-cleanup → verify → report.
 
 ## Headline result
 
@@ -63,22 +63,22 @@ Initial template had `ttlSecondsAfterFinished: 300`, so each SUCCEEDED RayJob ke
 
 ```
 voltest/
-├── plan.md                              Pre-execution plan (revised after user directive to scale up to 8-node jobs)
-├── dev_notes.md                         Live execution log (phase-by-phase)
-├── summary.md                           This file
-├── gpu_burn.py                          Ray app (64-GPU GEMM burn)
-├── launch.sh                            Submit N jobs from template
-├── monitor.sh                           One-shot probe of state
-├── collect_logs.sh                      Archive per-pod logs after run
+├── plan.md                     Pre-execution plan (revised after user directive to scale up to 8-node jobs)
+├── dev_notes.md                Live execution log (phase-by-phase)
+├── summary.md                  This file
+├── gpu_burn.py                 Ray app (64-GPU GEMM burn)
+├── run_pipeline.sh             End-to-end orchestration: preflight → submit → watch → cleanup → verify → report
+├── monitor.sh                  One-shot status probe (ad-hoc debugging)
 ├── yaml/
-│   ├── voltest-rayjob-template.yaml     Parameterised RayJob (__JOBNAME__)
-│   └── generated-voltest-{0..9}.yaml    Per-job instantiations
+│   └── rayjob.yaml             SOLE template; placeholders __JOBNAME__, __DURATION_S__
 └── logs/
-    ├── voltest-{0..9}.log               Per-job gpu_burn PFS logs
-    ├── submit.log                        kubectl apply output
-    ├── cleanup.log                       auto-cleanup events
-    └── monitor-states.log                45s-interval state snapshots
+    ├── voltest-{0..9}.log      Per-job gpu_burn PFS logs
+    └── pipeline-<ts>.log       Pipeline run log (submit results + state changes + cleanup events)
 ```
+
+**Zero disk bloat**: the pipeline pipes `sed` → `kubectl apply -f -`, so
+submitting any N jobs produces no per-job yaml files. One template file,
+one run log per invocation, N per-job PFS logs.
 
 ## References
 

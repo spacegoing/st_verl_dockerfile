@@ -1,8 +1,11 @@
-# voltest RayJob template — 8 nodes × 8 GPU = 64 GPU/job, 5-min GPU burn.
-# Placeholder voltest-3 replaced by launch.sh with voltest-0..voltest-9.
+# voltest RayJob — 8 nodes × 8 GPU = 64 GPU/job, 5-min GPU burn.
+#
+# Sole source of truth for voltest. Placeholder __JOBNAME__ is substituted at
+# submission time by run_pipeline.sh and piped directly to `kubectl apply -f -`
+# — no intermediate files land on disk.
 #
 # Per KubeRay Volcano integration (https://docs.ray.io/en/latest/cluster/kubernetes/k8s-ecosystem/volcano.html):
-#   - kuberay-operator started with --batch-scheduler=volcano (done in Phase 4)
+#   - kuberay-operator started with --batch-scheduler=volcano
 #   - KubeRay auto-creates a PodGroup with minMember = 1 (head) + 7 (workers) = 8
 #   - No schedulerName on pods; operator sets it
 #   - No ray.io/scheduler-name label needed (KubeRay v1.3.0+)
@@ -10,7 +13,7 @@
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: voltest-3
+  name: __JOBNAME__
   namespace: default
   labels:
     voltest: "true"
@@ -19,7 +22,7 @@ metadata:
 spec:
   entrypoint: python3 /root/myCodeLab/host/voltest/gpu_burn.py
   shutdownAfterJobFinishes: true
-  ttlSecondsAfterFinished: 300
+  ttlSecondsAfterFinished: 30   # short TTL so nodes free quickly for next queued job
 
   rayClusterSpec:
     rayVersion: '2.54.0'
@@ -32,7 +35,7 @@ spec:
         metadata:
           labels:
             voltest: "true"
-            voltest-job: voltest-3
+            voltest-job: __JOBNAME__
         spec:
           imagePullSecrets:
           - name: aliyunsecret
@@ -42,9 +45,9 @@ spec:
             imagePullPolicy: IfNotPresent
             env: &full_env
             - name: JOB_NAME
-              value: voltest-3
+              value: __JOBNAME__
             - name: DURATION_S
-              value: "300"
+              value: "__DURATION_S__"
             - name: LOG_DIR
               value: /root/myCodeLab/host/voltest/logs
             - name: PYTHONPYCACHEPREFIX
@@ -97,7 +100,7 @@ spec:
         metadata:
           labels:
             voltest: "true"
-            voltest-job: voltest-3
+            voltest-job: __JOBNAME__
         spec:
           imagePullSecrets:
           - name: aliyunsecret

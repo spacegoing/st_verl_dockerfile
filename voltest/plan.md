@@ -75,16 +75,21 @@ Counting PodGroup state is the signal: with gang, we see clean boolean (`Running
 voltest/
 ├── plan.md                 # this file
 ├── dev_notes.md            # live log, updated as work proceeds
+├── summary.md              # headline report
 ├── gpu_burn.py             # the Ray app (main script)
 ├── yaml/
-│   └── voltest-rayjob-template.yaml    # RayJob spec, parameterised by ${N}
-├── launch.sh               # generate 10 yamls from template, apply them
-├── monitor.sh              # watch PodGroup / Pod / RayJob state
-├── collect_logs.sh         # gather per-job logs after completion
+│   └── rayjob.yaml         # SOLE source-of-truth template (placeholders: __JOBNAME__, __DURATION_S__)
+├── run_pipeline.sh         # end-to-end pipeline: preflight → submit → watch → cleanup → verify → report
+├── monitor.sh              # (optional) one-shot probe of current state
 └── logs/
-    ├── job-0.log ... job-9.log         # per-job pod stdout
-    └── submit.log                      # kubectl output from launch
+    ├── voltest-0.log .. voltest-9.log  # per-job PFS logs from gpu_burn
+    └── pipeline-<ts>.log               # per-run operational log (submit/watch/cleanup events)
 ```
+
+**One yaml, no bloat**: `run_pipeline.sh` renders the template via `sed` and
+pipes straight into `kubectl apply -f -`; no per-job files are written to
+disk. Submitting N=10 jobs produces **zero** intermediate yaml files — only
+the single source template persists in `yaml/`.
 
 ## Phases
 
@@ -101,8 +106,8 @@ voltest/
    - Total per job: 1 head + 7 workers = **8 pods**, minMember=8
    - **No** `kueue.x-k8s.io/queue-name` label
    - **No** `schedulerName: volcano` on pods (operator sets it)
-3. Write `launch.sh` that `sed`s the template 10 times with unique names `voltest-N` for N=0..9 and applies each.
-4. Write `monitor.sh` and `collect_logs.sh`.
+3. Write `run_pipeline.sh` — one end-to-end script covering all operational phases (preflight, submit, watch, cleanup, verify, report). Renders template via `sed` and pipes straight to `kubectl apply -f -` so no per-job yaml files ever touch disk.
+4. Write `monitor.sh` — optional one-shot status probe for ad-hoc debugging.
 
 ### Phase B — Dry test: one job end-to-end
 
