@@ -1,0 +1,124 @@
+# voltest RayJob template — 8 nodes × 8 GPU = 64 GPU/job, 5-min GPU burn.
+# Placeholder voltest-8 replaced by launch.sh with voltest-0..voltest-9.
+#
+# Per KubeRay Volcano integration (https://docs.ray.io/en/latest/cluster/kubernetes/k8s-ecosystem/volcano.html):
+#   - kuberay-operator started with --batch-scheduler=volcano (done in Phase 4)
+#   - KubeRay auto-creates a PodGroup with minMember = 1 (head) + 7 (workers) = 8
+#   - No schedulerName on pods; operator sets it
+#   - No ray.io/scheduler-name label needed (KubeRay v1.3.0+)
+
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: voltest-8
+  namespace: default
+  labels:
+    voltest: "true"
+    lepton.sensetime.com/submitter: lichang93
+    lepton.sensetime.com/framework-type: Ray
+spec:
+  entrypoint: python3 /root/myCodeLab/host/voltest/gpu_burn.py
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 300
+
+  rayClusterSpec:
+    rayVersion: '2.54.0'
+
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: '0.0.0.0'
+        num-gpus: '8'
+      template:
+        metadata:
+          labels:
+            voltest: "true"
+            voltest-job: voltest-8
+        spec:
+          imagePullSecrets:
+          - name: aliyunsecret
+          containers:
+          - name: ray-head
+            image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+            imagePullPolicy: IfNotPresent
+            env: &full_env
+            - name: JOB_NAME
+              value: voltest-8
+            - name: DURATION_S
+              value: "300"
+            - name: LOG_DIR
+              value: /root/myCodeLab/host/voltest/logs
+            - name: PYTHONPYCACHEPREFIX
+              value: /tmp/pycache
+            - name: RAY_USAGE_STATS_ENABLED
+              value: "0"
+            - name: RAY_ENABLE_OPENTELEMETRY
+              value: "0"
+            - name: TORCH_NCCL_ASYNC_ERROR_HANDLING
+              value: "1"
+            - name: VLLM_ATTENTION_BACKEND
+              value: CUTLASS_MLA
+            resources:
+              requests:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+              limits:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+            securityContext:
+              capabilities:
+                add: [IPC_LOCK]
+            volumeMounts: &full_mounts
+            - name: afs-pvc
+              mountPath: /root/myCodeLab/host
+              subPath: lichang93/st_verl_dockerfile
+            - name: shm
+              mountPath: /dev/shm
+          volumes: &full_volumes
+          - name: afs-pvc
+            persistentVolumeClaim:
+              claimName: pvc-jdwzpnv
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 60Gi
+
+    workerGroupSpecs:
+    - groupName: workers
+      replicas: 7
+      minReplicas: 7
+      maxReplicas: 7
+      rayStartParams:
+        num-gpus: '8'
+      template:
+        metadata:
+          labels:
+            voltest: "true"
+            voltest-job: voltest-8
+        spec:
+          imagePullSecrets:
+          - name: aliyunsecret
+          containers:
+          - name: ray-worker
+            image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+            imagePullPolicy: IfNotPresent
+            env: *full_env
+            resources:
+              requests:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+              limits:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+            securityContext:
+              capabilities:
+                add: [IPC_LOCK]
+            volumeMounts: *full_mounts
+          volumes: *full_volumes

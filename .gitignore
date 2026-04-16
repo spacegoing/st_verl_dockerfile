@@ -6,4 +6,5 @@ downloads/
 nltk_data/
 verifiable-instructions/
 legacy/MJ_NEMO_GYM/
+*.log
 legacy/verl.old/
