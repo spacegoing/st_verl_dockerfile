@@ -1,0 +1,18 @@
+# Test PVC with explicit afs.root_squash: "true" — SHOULD squash.
+# This is the experimental control for comparison with pvc-false.yaml.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: squash-test-true
+  namespace: default
+  annotations:
+    afs.endpoint: "afs://019c70e4-68da-73af-9a70-e47e0c9b5ac6.mds.cluster1.cn-sh-01e.sensecore.cn"
+    afs.root_squash: "true"
+    afs.secretName: "jdafs"
+spec:
+  storageClassName: quarkfs-sc
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi

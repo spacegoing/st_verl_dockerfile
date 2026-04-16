@@ -1,0 +1,17 @@
+# Test PVC with NO afs.root_squash annotation (control — whatever the default is).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: squash-test-default
+  namespace: default
+  annotations:
+    afs.endpoint: "afs://019c70e4-68da-73af-9a70-e47e0c9b5ac6.mds.cluster1.cn-sh-01e.sensecore.cn"
+    afs.secretName: "jdafs"
+    # NOTE: afs.root_squash annotation deliberately omitted.
+spec:
+  storageClassName: quarkfs-sc
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi

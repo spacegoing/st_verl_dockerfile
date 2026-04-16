@@ -1,0 +1,18 @@
+# Test PVC with explicit afs.root_squash: "false" annotation set AT CREATION.
+# Admin's suggestion: this should NOT squash root.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: squash-test-false
+  namespace: default
+  annotations:
+    afs.endpoint: "afs://019c70e4-68da-73af-9a70-e47e0c9b5ac6.mds.cluster1.cn-sh-01e.sensecore.cn"
+    afs.root_squash: "false"
+    afs.secretName: "jdafs"
+spec:
+  storageClassName: quarkfs-sc
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi

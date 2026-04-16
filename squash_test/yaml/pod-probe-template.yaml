@@ -1,0 +1,86 @@
+# Probe pod template. Replace __PVC__ with the PVC name.
+# Also writes a report into /mnt/public/lichang93/st_verl_dockerfile/squash_test/logs/
+# via a separate subPath mount on the existing pvc-jdwzpnv for log collection.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: squash-probe-__PVC_SHORT__
+  namespace: default
+  labels:
+    squashtest: "true"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: probe
+    image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+    imagePullPolicy: IfNotPresent
+    command:
+      - bash
+      - -c
+      - |
+        set -x
+        echo "===== $(date -u +%FT%TZ) ====="
+        echo "[[BEGIN REPORT for PVC __PVC__]]"
+        echo ""
+        echo "# Pod process identity"
+        id
+        echo ""
+        echo "# Mount list (filter /mnt)"
+        mount | grep /mnt || true
+        echo ""
+        echo "# /mnt/pfs contents BEFORE touch"
+        ls -la /mnt/pfs/ 2>&1 | head -20
+        echo ""
+        echo "# Write a probe file"
+        PROBE_FILE=/mnt/pfs/probe-from-pod-__PVC__-$(date -u +%H%M%S).txt
+        echo "hello from pod, creating probe file: $PROBE_FILE"
+        echo "payload written at $(date -u +%FT%TZ)" > "$PROBE_FILE"
+        echo ""
+        echo "# stat (inside pod view)"
+        stat "$PROBE_FILE"
+        echo ""
+        echo "# ls (inside pod view)"
+        ls -la "$PROBE_FILE"
+        echo ""
+        echo "# Create a dir and see its owner"
+        PROBE_DIR=/mnt/pfs/probe-dir-__PVC__-$(date -u +%H%M%S)
+        mkdir -p "$PROBE_DIR"
+        ls -ld "$PROBE_DIR"
+        echo ""
+        echo "# Sync and hang briefly so host can observe"
+        sync
+        echo ""
+        echo "# Read test — can we read files owned by UID 0 on the AFS server?"
+        echo "# lichang93/ is known to contain root-owned dirs (see ls -la output above)"
+        echo "# Try listing it and reading one file"
+        echo "ls on /mnt/pfs/lichang93:"
+        ls -la /mnt/pfs/lichang93/ 2>&1 | head -5
+        echo ""
+        echo "Pick a root-owned file (if any) and try to read it:"
+        ROOT_OWNED=$(find /mnt/pfs/lichang93 -maxdepth 2 -user 0 -type f 2>/dev/null | head -1)
+        if [ -n "$ROOT_OWNED" ]; then
+          echo "Attempting to read: $ROOT_OWNED"
+          ls -la "$ROOT_OWNED"
+          head -c 100 "$ROOT_OWNED" 2>&1 | head -3
+          echo "..."
+          echo "(read test exit code: $?)"
+        else
+          echo "No root-owned files found under lichang93/"
+        fi
+        echo ""
+        echo "[[END REPORT for PVC __PVC__]]"
+        sleep 10
+    volumeMounts:
+    - name: probe-pvc
+      mountPath: /mnt/pfs
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+  volumes:
+  - name: probe-pvc
+    persistentVolumeClaim:
+      claimName: __PVC__
