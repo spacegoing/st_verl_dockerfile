@@ -1,0 +1,28 @@
+# Long-running interactive pod that mounts the admin-created PVC pvc-jdwzpnv
+# at the same subPath verl training uses (lichang93/st_verl_dockerfile →
+# /root/myCodeLab/host inside the pod). This reproduces the exact mount
+# condition of a real training pod.
+#
+# sleep 3600 keeps the pod alive so we can `kubectl exec -it` into it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: squash-shell
+  namespace: default
+  labels:
+    squashtest: "true"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: shell
+    image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: afs-pvc
+      mountPath: /root/myCodeLab/host
+      subPath: lichang93/st_verl_dockerfile
+  volumes:
+  - name: afs-pvc
+    persistentVolumeClaim:
+      claimName: pvc-jdwzpnv

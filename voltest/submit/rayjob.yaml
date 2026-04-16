@@ -1,8 +1,11 @@
-# voltest RayJob — 8 nodes × 8 GPU = 64 GPU/job, 5-min GPU burn.
+# voltest RayJob — 8 nodes × 8 GPU = 64 GPU/job, GPU burn for $DURATION_S seconds.
 #
-# Sole source of truth for voltest. Placeholder __JOBNAME__ is substituted at
-# submission time by run_pipeline.sh and piped directly to `kubectl apply -f -`
-# — no intermediate files land on disk.
+# Submitted via ./submit.sh [duration_s]
+#   ./submit.sh            # default duration (see submit.sh)
+#   ./submit.sh 60         # 60-second smoke
+#
+# Placeholders resolved at submit time via envsubst (whitelist: DURATION_S).
+# generateName = voltest- → k8s auto-appends a unique suffix per submission.
 #
 # Per KubeRay Volcano integration (https://docs.ray.io/en/latest/cluster/kubernetes/k8s-ecosystem/volcano.html):
 #   - kuberay-operator started with --batch-scheduler=volcano
@@ -13,7 +16,7 @@
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: __JOBNAME__
+  generateName: voltest-
   namespace: default
   labels:
     voltest: "true"
@@ -22,7 +25,7 @@ metadata:
 spec:
   entrypoint: python3 /root/myCodeLab/host/voltest/gpu_burn.py
   shutdownAfterJobFinishes: true
-  ttlSecondsAfterFinished: 30   # short TTL so nodes free quickly for next queued job
+  ttlSecondsAfterFinished: 30   # short TTL so Volcano can promote next gang quickly
 
   rayClusterSpec:
     rayVersion: '2.54.0'
@@ -35,7 +38,6 @@ spec:
         metadata:
           labels:
             voltest: "true"
-            voltest-job: __JOBNAME__
         spec:
           imagePullSecrets:
           - name: aliyunsecret
@@ -44,10 +46,15 @@ spec:
             image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
             imagePullPolicy: IfNotPresent
             env: &full_env
+            # JOB_NAME sourced from downward API — no templating needed.
+            # ray.io/cluster label is set by kuberay-operator to <rayjob-name>-<5char>,
+            # which is unique per RayJob. Used by gpu_burn.py for the PFS log filename.
             - name: JOB_NAME
-              value: __JOBNAME__
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['ray.io/cluster']
             - name: DURATION_S
-              value: "__DURATION_S__"
+              value: "${DURATION_S}"
             - name: LOG_DIR
               value: /root/myCodeLab/host/voltest/logs
             - name: PYTHONPYCACHEPREFIX
@@ -100,7 +107,6 @@ spec:
         metadata:
           labels:
             voltest: "true"
-            voltest-job: __JOBNAME__
         spec:
           imagePullSecrets:
           - name: aliyunsecret

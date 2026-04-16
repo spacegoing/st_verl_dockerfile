@@ -1,7 +1,106 @@
 # Findings — AFS root_squash behavior on QuarkFS CSI
 
-**Date**: 2026-04-16, run 06:00–06:10 UTC
+**Rounds**: Round 1 (2026-04-16 06:00–06:10 UTC), Round 2 (2026-04-16 10:52 UTC — re-verify after admin said "fixed")
 **Cluster**: vcluster on SenseCore k8s, QuarkFS (quarkfs-sc / csi.quarkfs.com)
+
+---
+
+## Round 2 (2026-04-16 10:52 UTC) — ADMIN FIX NOT EFFECTIVE
+
+Admin reported the squash issue as fixed. Re-ran the exact same 3-PVC probe
+methodology. Result: **no change**. Same squash, same mount options, same
+behavior across all three annotation values.
+
+| PVC | Pod uid | File created by pod — UID on PFS | FUSE mount options |
+|---|---|---|---|
+| `squash-test-false` | 0 (root) | **10000/UNKNOWN** ❌ | `rw,relatime,user_id=0,group_id=0,default_permissions,allow_other` |
+| `squash-test-true` | 0 (root) | **10000/UNKNOWN** ❌ | `rw,relatime,user_id=0,group_id=0,allow_other` |
+| `squash-test-default` | 0 (root) | **10000/UNKNOWN** ❌ | `rw,relatime,user_id=0,group_id=0,default_permissions,allow_other` |
+
+Logs: `logs/probe-{false,true,default}.log` (round 2) and `logs/round1-20260416/` (round 1).
+
+Comparison — ***identical*** to round 1 along every axis:
+1. All three pods ran as `uid=0(root) gid=0(root)`.
+2. Every file/dir created on AFS ended up owned by `10000/UNKNOWN` on the host.
+3. The only annotation-dependent difference remains the `default_permissions`
+   FUSE flag (absent when `afs.root_squash: "true"`, present otherwise).
+4. Pre-existing root-owned dirs (`asr/`, `io_test/`, `kk/`, `lichang93/`) are
+   still root-owned on the host view, confirming the filesystem itself can
+   hold root-owned files — they just aren't writable as root from our pods.
+5. Round 1's probe files (from 06:02–06:05 UTC) are still visible in
+   `/mnt/pfs/` — still owned by 10000.
+
+**Conclusion of round 2**: whatever admin did, the effect on this PVC +
+StorageClass + `jdafs` secret combination is nil. Either the admin fix
+targeted a different resource (wrong PVC, wrong namespace, wrong CSI driver),
+or the intended change didn't propagate to the running CSI pods, or the fix
+assumes a client-side mount option that this CSI driver doesn't honor.
+
+### What to report back to admin (round 2)
+
+> 李老师 重新测试了 — 问题没解决。
+>
+> 复现步骤: 新建 3 个 PVC (annotation `afs.root_squash` 分别为 `true` / `false` / 未设置)，在每个 PVC 上跑一个 uid=0 root 的 pod，创建文件并看 host 上的 owner。三个 PVC 的结果都一样: **文件 owner = 10000 / UNKNOWN**。跟上次 4月16日早上6点测试完全一致。
+>
+> 之前的诊断结论还成立: 这个 squash 是 **server-side** 由 `jdafs` access key 决定的，不是 CSI mount options 能覆盖的。想让 pod 作为 root 写 AFS，需要:
+> - (a) 换一个 access key，它对应 server 侧的 uid=0 身份；或
+> - (b) 把 `jdafs` 现有 access key 在 server 侧映射到 uid=0；或
+> - (c) 在 quarkfs server 的这个 AFS 卷上显式开一个类似 NFS `no_root_squash` 的 per-volume option（如果 QuarkFS 支持）。
+>
+> 现在的 workaround 是每次在 host 上写了文件给 pod 读之前跑 `chmod -R o+rX`，但不是长久之计。
+>
+> 完整测试日志: `/mnt/public/lichang93/st_verl_dockerfile/squash_test/logs/`
+
+### Round 2 cleanup
+
+All round-2 test objects deleted (`kubectl delete pvc squash-test-* pod -l squashtest=true`). Confirmed clean.
+The round-1 probe files/dirs left on `/mnt/pfs/` are still there (owned by 10000, manually removable).
+
+### Round 2b — direct test against the (re-created) production PVC `pvc-jdwzpnv`
+
+User caught a blind spot in Round 2: I had only tested freshly-created
+*squash-test-\** PVCs, not the actual production PVC `pvc-jdwzpnv`. On
+closer inspection, `pvc-jdwzpnv` had been **recreated by the admin at
+2026-04-16 08:19 UTC** (new underlying PV `pvc-e100c838-…`, ~2.5h old at
+test time). So the admin's fix attempt was specifically to recreate this
+PVC — which Round 2 never tested.
+
+Re-ran the probe against `pvc-jdwzpnv` directly (pod mounts the full PVC at
+`/mnt/pfs`, writes a file under `lichang93/st_verl_dockerfile/squash_test/`
+so the host can see it at `/mnt/public/lichang93/…`):
+
+```
+INSIDE POD (at 2026-04-16 10:57 UTC)
+  id       → uid=0(root) gid=0(root)
+  mount    → quarkfs_client … user_id=0,group_id=0,default_permissions,allow_other
+  stat     → Uid: (10000/UNKNOWN) Gid: (10000/UNKNOWN)
+
+HOST
+  ls -la prod-probe-105731.txt
+  → -rw-r--r-- 1 10000 10000 48 Apr 16 10:57
+```
+
+**Result: identical squash behavior**. Recreating the PVC did not change
+anything — because the PVC points at the same `afs.endpoint` with the same
+`afs.secretName: jdafs`, and the squash is determined server-side by the
+access key's user mapping, not by the PVC lifecycle.
+
+### Updated takeaway for admin
+
+> 老师 重新跑了一遍，这次直接针对您今天早上 08:19 UTC 重建的 `pvc-jdwzpnv` 测试 (而不是我之前新建的 squash-test-* PVC) —— 行为一样，pod 里 root 写文件在 host 上还是 10000。
+>
+> 重建 PVC 本身没用，因为新 PVC 还是:
+> - 指向同一个 `afs.endpoint` (019c70e4-68da-…)
+> - 用同一个 `afs.secretName: jdafs`
+> - 同样的 FUSE mount option (`user_id=0,group_id=0,default_permissions,allow_other`)
+>
+> Squash 不是 CSI / PVC 层决定的，是 quarkfs 服务端根据 `jdafs` 这个 access key 的用户映射决定的。只要这个 key 还绑在 uid 10000 上，不管 PVC 怎么重建都没用。需要在服务端做 (a) 换 key、(b) 把 key 映射到 uid 0、或 (c) 给这个卷开 per-volume no_root_squash 之一。
+>
+> 完整证据: `/mnt/public/lichang93/st_verl_dockerfile/squash_test/findings.md` §Round 2b
+
+---
+
+## Round 1 (2026-04-16 06:00 UTC) — original findings, preserved below for history
 
 ## Executive summary
 

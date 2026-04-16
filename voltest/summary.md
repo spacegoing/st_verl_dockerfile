@@ -10,8 +10,8 @@
 Total demand: 10 × 8 = **80 pods on a 31-node cluster** — gang-scheduling hard stress test.
 
 - Ray app: [`gpu_burn.py`](gpu_burn.py) — dispatches 8 parallel `@ray.remote(num_gpus=8)` tasks, each running 5 min of `torch.matmul` on 8 GPUs.
-- RayJob yaml: [`yaml/rayjob.yaml`](yaml/rayjob.yaml) — 1 head + 7 workers (minMember=8), whole-node resource sizing. Single source of truth with `__JOBNAME__` / `__DURATION_S__` placeholders.
-- Pipeline: [`run_pipeline.sh`](run_pipeline.sh) — one script: preflight → submit (streamed, no per-job files on disk) → watch+auto-cleanup → verify → report.
+- RayJob yaml: [`yaml/rayjob.yaml`](yaml/rayjob.yaml) — 1 head + 7 workers (minMember=8), whole-node resource sizing. Uses `metadata.generateName: voltest-` so every `kubectl create` produces a unique resource (no templating).
+- Pipeline: [`run_pipeline.sh`](run_pipeline.sh) — preflight → submit (k8s-native generateName) → wait → verify → report. Job identifier flows through k8s Downward API, not string substitution.
 
 ## Headline result
 

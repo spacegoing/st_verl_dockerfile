@@ -372,3 +372,123 @@ voltest/
     ├── voltest-N.log            ← per-job PFS logs (persist across runs)
     └── pipeline-<ts>.log        ← operational log per pipeline invocation
 ```
+
+## 2026-04-16 06:30 UTC — Simplification: remove redundant manual cleanup
+
+User feedback: "won't volcano scheduler itself watch job status and promote
+from waiting to running auto? why do we have to manually delete?"
+
+**User was right.** The manual `kubectl delete rayjob` inside the loop was a
+leftover from Bug #2 era (`ttlSecondsAfterFinished: 300`). Since I fixed the
+template to `ttl=30`, the full lifecycle is now fully automated:
+
+```
+t=5:00  RayJob completes → status=SUCCEEDED
+t=5:00  KubeRay starts ttl=30 countdown
+t=5:30  KubeRay cascade-deletes RayJob → RayCluster → 8 pods
+t=5:30  Volcano sees 8 nodes free → promotes next Inqueue PodGroup → 8 pods bound
+```
+
+Volcano's scheduling loop runs continuously; KubeRay owns job-to-cluster
+lifecycle via ttl. No manual intervention needed with this config.
+
+### Change
+- Renamed `phase_3_watch_and_cleanup()` → `phase_3_wait()` (just waits).
+- Removed the inner `kubectl delete rayjob` loop.
+- Changed loop exit condition from "all RayJob CRs gone" to "all N jobs reached SUCCEEDED/FAILED/missing".
+  - Covers the window where RayJob CR still exists (SUCCEEDED, pre-ttl) and where it's been deleted (post-ttl).
+- Renumbered subsequent phases (was 5→verify, 6→report; now 4/5).
+
+### Why keep the watch loop at all?
+The loop is no longer for cleanup — it's simply the pipeline's **blocking
+wait** so phase 4 (verify) runs after all jobs finish. It could be replaced
+with `kubectl wait --for=jsonpath='{.status.jobStatus}'=SUCCEEDED rayjob/...`
+on each, but:
+1. KubeRay deletes the CR when ttl expires, which can race `kubectl wait`.
+2. The condensed state logging (e.g. "done=5/10 voltest-0:Running voltest-3:Inqueue ...") is
+   the user-visible progress indicator during the 20+ minute batch.
+
+### Cost of the redundancy
+With `ttl=30`, the manual cleanup only saved ~30s per wave. For a 10-job
+3-wave run (32 min wall clock), that's ~1 min total — not worth the code
+complexity or the risk of confusion about "who frees the nodes".
+
+## 2026-04-16 06:40 UTC — Consolidation pass 2: drop sed, use generateName
+
+User feedback: "bash script replacing string in yaml is very weird, what's
+the best practice submitting diff jobs? is this convention?"
+
+**User was right.** sed-templating is shell-script convention but not k8s
+best practice. The idiomatic k8s way to submit N identical instances of one
+resource is `metadata.generateName`: k8s auto-appends a random 5-char suffix
+on `kubectl create`, so one yaml → N unique resources with zero string
+substitution.
+
+### Changes
+1. `yaml/rayjob.yaml`: `name: __JOBNAME__` → `generateName: voltest-`
+2. `yaml/rayjob.yaml`: removed `__DURATION_S__` placeholder; DURATION hardcoded to 300. If per-invocation override needed later, use a ConfigMap + `envFrom`.
+3. `yaml/rayjob.yaml`: JOB_NAME env var now from **Downward API** — `fieldRef: metadata.labels['ray.io/cluster']`. The label is auto-set by kuberay-operator to the RayCluster name (e.g. `voltest-ksvz8-bnrxr`), which is unique per job.
+4. `run_pipeline.sh`: `kubectl create -f yaml/rayjob.yaml -o name` → captures the generated name per iteration; tracked in `logs/.pipeline-<ts>-names`.
+5. `run_pipeline.sh`: watch/verify operate on that names file (not on `voltest-0..9`).
+
+### Bugs found and fixed during the rewrite
+
+**Bug #3 — lowercase proxy vars**. The shell environment had both uppercase
+(`HTTPS_PROXY`) and lowercase (`https_proxy`) proxy vars set. My original
+`export HTTPS_PROXY= HTTP_PROXY= NO_PROXY=...` only cleared uppercase; Go's
+HTTP client (used by kubectl) checks both, so kubectl still went through the
+proxy and got "Forbidden" on cluster-scope reads. Fixed by:
+```bash
+unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
+export NO_PROXY="$K8S_API_IP" no_proxy="$K8S_API_IP"
+```
+
+**Bug #4 — terminal-state false positive**. My wait-loop logic treated empty
+`status.jobStatus` as terminal ("" = post-ttl deletion), but a fresh RayJob
+also has empty jobStatus during Initializing. Fixed by first checking CR
+existence via `kubectl get -o name`, then checking jobStatus only if the CR
+still exists.
+
+### Smoke test (N=1, full 5-min run)
+
+```
+[06:40:53] PHASE 1 — preflight            cluster GPUs: 248
+[06:40:53] PHASE 2 — submit 1 jobs         [1/1] voltest-ksvz8  (random suffix)
+[06:40:53] PHASE 3 — wait
+[06:41:13] done=0/1  ray-voltest-ksvz8-pg:Running(1/8)          ← head up
+[06:42:14] done=0/1  ray-voltest-ksvz8-pg:Running(8/8)          ← all 8 pods up
+[06:48:17] all N=1 jobs terminal                                 ← 7:24 total
+[06:48:17] PHASE 4 — verify:  voltest-ksvz8: 7/8 DONE markers ~ (benign teardown race)
+[06:48:17] verified: 1 pass, 0 fail
+[06:48:17] wall clock: 444s
+```
+
+PFS log filename: `logs/voltest-ksvz8-bnrxr.log` — derived from `ray.io/cluster`
+label via Downward API. First lines confirm JOB_NAME was injected correctly:
+```
+[voltest-ksvz8-bnrxr] [node0] [voltest-ksvz8-bnrxr-head-qzgv9] gpu_burn start: ...
+```
+
+### Final dir
+```
+voltest/
+├── dev_notes.md
+├── gpu_burn.py                    (unchanged; reads JOB_NAME env var as before)
+├── monitor.sh
+├── plan.md
+├── run_pipeline.sh
+├── summary.md
+├── yaml/
+│   └── rayjob.yaml                ← generateName: voltest-; no placeholders
+└── logs/
+    ├── voltest-<5c>-<5c>.log      ← one per RayCluster, named via downward API
+    ├── pipeline-<ts>.log
+    └── .pipeline-<ts>-names       ← tracks which rayjobs each pipeline run owns
+```
+
+### What this buys us
+- No per-job yaml files on disk — ever
+- No sed/envsubst/yq dependencies
+- yaml is a plain k8s manifest that `kubectl apply --dry-run=server` can validate normally
+- Log filenames trace back to the exact RayCluster / PodGroup for post-mortem
+- Pipeline script is one step simpler (no template rendering)
