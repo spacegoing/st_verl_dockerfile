@@ -1,0 +1,32 @@
+# Interactive pod mounting squash-test-false PVC (afs.root_squash: "false").
+# Pod mounts the PVC root at /mnt/pfs so you can touch/vi files and the host
+# sees them under the same AFS volume (visible via host PFS as uid 10000 if
+# the server-side squash bug still applies).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: squash-shell-false
+  namespace: default
+  labels:
+    squashtest: "true"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: shell
+    image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: afs-pvc
+      mountPath: /mnt/pfs
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+  volumes:
+  - name: afs-pvc
+    persistentVolumeClaim:
+      claimName: squash-test-false

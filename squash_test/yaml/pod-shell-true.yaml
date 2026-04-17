@@ -1,0 +1,30 @@
+# Interactive pod mounting squash-test-true PVC (afs.root_squash: "true").
+# Control variant to compare against pod-shell-false.yaml.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: squash-shell-true
+  namespace: default
+  labels:
+    squashtest: "true"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: shell
+    image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: afs-pvc
+      mountPath: /mnt/pfs
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+  volumes:
+  - name: afs-pvc
+    persistentVolumeClaim:
+      claimName: squash-test-true

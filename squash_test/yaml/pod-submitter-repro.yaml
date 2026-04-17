@@ -1,0 +1,43 @@
+# Reproduces voltest Bug #1 minimally: one pod, runs as non-root (uid 10000,
+# mimicking the kuberay auto-submitter / "ccr-jd" identity), mounts the
+# PFS PVC at the same subPath real training uses, then sleeps so you can
+# kubectl exec in and open mode-750 root-owned files to hit EACCES.
+#
+# Why runAsUser: 10000?  The Ray head/worker pods in voltest ran as root
+# (uid 0) — they couldn't reproduce the bug.  The kuberay auto-submitter
+# pod ran as the ccr-jd tenant identity (uid 10000 — same uid PFS squashes
+# writes to).  Bug #1 hit only on that submitter pod because non-root
+# can't match a root-owned mode-750 file (falls to "other" → no bits).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: submitter-repro
+  namespace: default
+  labels:
+    squashtest: "true"
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+    fsGroup: 10000
+  containers:
+  - name: shell
+    image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "7200"]
+    volumeMounts:
+    - name: afs-pvc
+      mountPath: /root/myCodeLab/host
+      subPath: lichang93/st_verl_dockerfile
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "200m"
+        memory: "256Mi"
+  volumes:
+  - name: afs-pvc
+    persistentVolumeClaim:
+      claimName: pvc-jdwzpnv

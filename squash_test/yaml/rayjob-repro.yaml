@@ -1,0 +1,106 @@
+# Minimal RayJob that reproduces voltest Bug #1 in the exact training env.
+# Same image, same mounts, same securityContext, same labels as voltest/submit/rayjob.yaml.
+# Differences:
+#   - 0 worker replicas (1 head pod only — "fewer nodes")
+#   - Head requests 0 GPU + tiny CPU/memory (so it schedules anywhere)
+#   - entrypoint = `sleep 7200` so the kuberay auto-submitter pod stays
+#     alive for 2h, giving you time to `kubectl exec` into it.
+#
+# Reproduces Bug #1 because the kuberay auto-submitter pod runs as the
+# tenant identity (uid 10000 = "ccr-jd"), NOT as root like the Ray head.
+# From inside the submitter pod, opening a root-owned mode-750 file on
+# the PFS mount → falls to "other" → EACCES.
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  generateName: squash-repro-
+  namespace: default
+  labels:
+    squashtest: "true"
+    lepton.sensetime.com/submitter: lichang93
+    lepton.sensetime.com/framework-type: Ray
+spec:
+  entrypoint: sleep 7200
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 30
+
+  # Override the kuberay-operator's default submitter so it mounts the PFS
+  # PVC at the same path as the head/workers. Without this, the submitter
+  # runs a bare pod with only the image's baked-in /root/myCodeLab/host.
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      # Bypass volcano — submitter is a standalone k8s Job, not part of the
+      # Ray podgroup, so it shouldn't go through gang scheduling.
+      schedulerName: default-scheduler
+      imagePullSecrets:
+      - name: aliyunsecret
+      containers:
+      - name: ray-job-submitter
+        image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+        - name: afs-pvc
+          mountPath: /root/myCodeLab/host
+          subPath: lichang93/st_verl_dockerfile
+      volumes:
+      - name: afs-pvc
+        persistentVolumeClaim:
+          claimName: pvc-jdwzpnv
+
+  rayClusterSpec:
+    rayVersion: '2.54.0'
+
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: '0.0.0.0'
+        num-gpus: '0'
+      template:
+        metadata:
+          labels:
+            squashtest: "true"
+        spec:
+          imagePullSecrets:
+          - name: aliyunsecret
+          containers:
+          - name: ray-head
+            image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: JOB_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['ray.io/cluster']
+            - name: PYTHONPYCACHEPREFIX
+              value: /tmp/pycache
+            - name: RAY_USAGE_STATS_ENABLED
+              value: "0"
+            - name: RAY_ENABLE_OPENTELEMETRY
+              value: "0"
+            resources:
+              requests:
+                cpu: '2'
+                memory: 8Gi
+              limits:
+                cpu: '4'
+                memory: 16Gi
+            securityContext:
+              capabilities:
+                add: [IPC_LOCK]
+            volumeMounts: &full_mounts
+            - name: afs-pvc
+              mountPath: /root/myCodeLab/host
+              subPath: lichang93/st_verl_dockerfile
+            - name: shm
+              mountPath: /dev/shm
+          volumes: &full_volumes
+          - name: afs-pvc
+            persistentVolumeClaim:
+              claimName: pvc-jdwzpnv
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+
+    # No workers — minimal single-node RayCluster.
+    workerGroupSpecs: []
