@@ -1,0 +1,537 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{red!70!black},
+  language=Python,
+  breaklines=true,
+  frame=single,
+  showstringspaces=false,
+  captionpos=b,
+}
+
+\title{BSPO --- Annotated equations with verl-style pseudo code}
+\author{Reading notes for plan0.md}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\noindent
+\textbf{Purpose.} Restate the equations of \texttt{bisim\_eqs.tex} in an order
+that matches the implementation, and attach a numpy-style pseudo-code block
+to each variable. Variable names follow verl's \texttt{core\_algos.py} /
+\texttt{compute\_policy\_loss\_*} signatures so this file doubles as an
+implementation reference.
+
+\section{Notation and verl variable map}
+
+\begin{tabular}{l|l|l}
+\textbf{Math} & \textbf{Verl name} & \textbf{Shape / semantics} \\
+\hline
+$\log r_{\tau,t}$ & \texttt{log\_ratio} & $(B, T)$, $B$ = num trajectories in batch \\
+$\text{mask}_{\tau,t}$ & \texttt{response\_mask} & $(B, T)$, 1 for valid tokens \\
+$T_\tau$ & \texttt{seq\_lens} & $(B,)$, $\texttt{response\_mask.sum(-1)}$ \\
+$\hat A_\tau$ (token level) & \texttt{advantages} & $(B, T)$; GRPO already broadcasts per-trajectory scalar \\
+$g$ (group) & \texttt{group\_ids} & $(B,)$, e.g. verl's \texttt{uid} field \\
+$\text{dom}$ (domain) & \texttt{domain\_ids} & $(B,)$, from curriculum sampler \\
+batch composition & $B = 128 \times 16$ & 128 groups, $n=16$ rollouts each (typical) \\
+\end{tabular}
+
+\medskip
+\noindent
+\textbf{Convention in pseudo code below}: all shapes are stated to the right
+of each assignment. Masked means / sums use the standard verl pattern
+\verb|(x * mask).sum(-1) / mask.sum(-1).clamp(min=1)|.
+
+\section{Per-trajectory primitives}
+
+\subsection{Per-token log ratio}
+\[
+\log r_{\tau,t} = \log \pi_\theta(a_{\tau,t}) - \log \pi_{\theta_{\text{old}}}(a_{\tau,t})
+\]
+
+\begin{lstlisting}[caption={log ratio (verl standard)}]
+# (B, T) each
+log_ratio = log_prob - old_log_prob                      # (B, T)
+log_ratio = torch.clamp(log_ratio, min=-20.0, max=20.0)  # numerical safety
+\end{lstlisting}
+
+\subsection{Per-trajectory sign-decomposed deviation ($s_\tau^+$, $s_\tau^-$)}
+
+\textbf{Canonical form (Q1 answer: arithmetic):}
+\[
+s_\tau^+ = \frac{1}{|\tau|} \sum_{t \in \tau} \max(r_t - 1, 0),
+\qquad
+s_\tau^- = \frac{1}{|\tau|} \sum_{t \in \tau} \max(1 - r_t, 0)
+\]
+
+Both are non-negative. $s_\tau^+ > 0$ counts tokens whose probability is
+raised by the new policy; $s_\tau^-$ counts tokens whose probability is
+lowered.
+
+\begin{lstlisting}[caption={arithmetic form (per Q1 answer)}]
+ratio = torch.exp(log_ratio)                                              # (B, T)
+T_tau = response_mask.sum(-1).clamp(min=1)                                # (B,)
+
+s_pos_tau = (torch.clamp(ratio - 1.0, min=0.0) * response_mask).sum(-1) / T_tau   # (B,)
+s_neg_tau = (torch.clamp(1.0 - ratio, min=0.0) * response_mask).sum(-1) / T_tau   # (B,)
+\end{lstlisting}
+
+\subsection{Signed trajectory deviation}
+\[
+s_\tau = s_\tau^+ - s_\tau^-
+\]
+
+\begin{lstlisting}
+s_tau = s_pos_tau - s_neg_tau                            # (B,)
+\end{lstlisting}
+
+\section{The two $\Delta$ operators}
+
+\subsection{Regular two-sided clip difference $\Delta_z^{(\text{reg})}$}
+\[
+\Delta_z^{(\text{reg})} = \operatorname{clip}(s_z^+, \delta_z) - \operatorname{clip}(s_z^-, \delta_z)
+\]
+Here \verb|clip(x, delta)| means $\min(x, \delta)$ (upper-clip; $s^\pm \ge 0$
+by construction). Below we use \verb|torch.clamp(x, max=delta)|.
+
+\begin{lstlisting}
+def delta_reg(s_pos: Tensor, s_neg: Tensor, delta: float) -> Tensor:
+    """
+    Two-sided clipped difference.
+    s_pos, s_neg: (B,), delta: scalar
+    returns:     (B,)
+    """
+    return torch.clamp(s_pos, max=delta) - torch.clamp(s_neg, max=delta)
+\end{lstlisting}
+
+\subsection{Wasserstein-style signed min-clip $\Delta_z^{(\text{W})}$}
+\[
+\Delta_z^{(\text{W})} = \operatorname{sgn}(s_z) \cdot
+  \operatorname{clip}\bigl(\min(s_z^+, s_z^-), \, \delta_z\bigr)
+\]
+
+\begin{lstlisting}
+def delta_w(s_pos: Tensor, s_neg: Tensor, delta: float) -> Tensor:
+    """
+    Wasserstein-style min-clip with sign from (s_pos - s_neg).
+    s_pos, s_neg: (B,) in the trajectory case; (G,) for groups; (D,) for domains.
+    returns: same shape
+    """
+    s = s_pos - s_neg                                         # (*,) signed
+    clipped_min = torch.clamp(torch.minimum(s_pos, s_neg), max=delta)  # (*,)
+    return torch.sign(s) * clipped_min                        # (*,)
+\end{lstlisting}
+
+\section{Advantage hierarchy (GRPO-style)}
+
+\subsection{Trajectory advantage}
+\[
+\hat A_\tau = \frac{R_\tau - \bar R_g}{\sigma_g}
+\]
+In verl this is \emph{already} computed upstream and broadcast per-token in
+the \texttt{advantages} tensor. To recover a per-trajectory scalar:
+
+\begin{lstlisting}
+# GRPO advantage is constant along t within a trajectory; take any valid token
+A_tau = (advantages * response_mask).sum(-1) / T_tau         # (B,)
+\end{lstlisting}
+
+\subsection{Group advantage}
+\[
+\hat A_g = \frac{1}{16} \sum_{\tau \in g} \hat A_\tau
+\]
+Assumes $n = 16$ rollouts per group (verl's \verb|rollout.n|).
+
+\begin{lstlisting}
+# group_ids: (B,) with values in [0, G)
+def scatter_mean(vals: Tensor, ids: Tensor, size: int) -> Tensor:
+    """mean of vals grouped by ids; returns (size,)"""
+    sums  = torch.zeros(size, device=vals.device, dtype=vals.dtype).scatter_add_(0, ids, vals)
+    counts = torch.zeros(size, device=vals.device, dtype=vals.dtype).scatter_add_(0, ids, torch.ones_like(vals))
+    return sums / counts.clamp(min=1)
+
+G = group_ids.max().item() + 1
+A_g_by_group = scatter_mean(A_tau, group_ids, G)             # (G,)
+A_g_per_traj = A_g_by_group[group_ids]                       # (B,) broadcast back
+\end{lstlisting}
+
+\subsection{Domain advantage}
+\[
+\hat A_{\text{dom}} = \frac{16}{128} \sum_{g : \text{dom}} \hat A_g
+\]
+Interpreted as ``mean of $\hat A_g$ over the groups belonging to this domain''
+--- the $\frac{16}{128}$ factor is $\frac{1}{G/D}$ for the common case
+$G = 128, D = 1$; more generally it is the mean coefficient.
+\textbf{SEE QUESTION \#5.}
+
+\begin{lstlisting}
+D = domain_ids.max().item() + 1
+# Distinct group_id within each domain
+# In practice group_id → domain_id mapping is already available from the data pipeline.
+group_to_dom = ...                                           # (G,)
+A_dom_by_dom = scatter_mean(A_g_by_group, group_to_dom, D)   # (D,)
+A_dom_per_traj = A_dom_by_dom[domain_ids]                    # (B,)
+\end{lstlisting}
+
+\subsection{Group- and domain-level $s_g^\pm, s_{\text{dom}}^\pm$}
+Parallel to $\hat A_g, \hat A_{\text{dom}}$ but averaging the per-trajectory
+deviations:
+
+\begin{lstlisting}
+s_pos_g_per_traj = scatter_mean(s_pos_tau, group_ids, G)[group_ids]       # (B,)
+s_neg_g_per_traj = scatter_mean(s_neg_tau, group_ids, G)[group_ids]       # (B,)
+
+s_pos_dom_per_traj = scatter_mean(s_pos_tau, domain_ids, D)[domain_ids]   # (B,)
+s_neg_dom_per_traj = scatter_mean(s_neg_tau, domain_ids, D)[domain_ids]   # (B,)
+
+# Then:
+delta_tau_w = delta_w(s_pos_tau, s_neg_tau, delta_tau)                    # (B,)
+delta_g_w   = delta_w(s_pos_g_per_traj, s_neg_g_per_traj, delta_g)        # (B,)
+delta_dom_w = delta_w(s_pos_dom_per_traj, s_neg_dom_per_traj, delta_dom)  # (B,)
+\end{lstlisting}
+
+\section{Four objective variants}
+
+Ordered by complexity of data dependency (simpler first).
+
+\subsection{Objective 1 --- Simplest baseline: $\hat J_{128 \times 16}$}
+\[
+\hat J_{128 \times 16}
+  = \widehat{\mathbb{E}}_{\tau \sim g \sim \text{dom}}
+    \bigl[\Delta_\tau^{(\text{reg})} \hat A_\tau\bigr]
+\]
+\textbf{Uses only trajectory-level data.} No group or domain IDs needed.
+
+\begin{lstlisting}[caption={Objective 1 --- baseline}]
+# ingredients: s_pos_tau, s_neg_tau, A_tau  (all (B,))
+delta_tau_reg = delta_reg(s_pos_tau, s_neg_tau, config.bspo_delta_tau)   # (B,)
+per_traj = delta_tau_reg * A_tau                                         # (B,)
+
+# Broadcast to per-token to reuse verl's agg_loss:
+per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)             # (B, T)
+loss = -agg_loss(per_token_obj, response_mask, loss_agg_mode)
+\end{lstlisting}
+
+\subsection{Objective 4 --- Wasserstein Penalty only}
+\[
+\hat J = \widehat{\mathbb{E}}
+  \Bigl[ s_\tau \hat A_\tau
+       - \lambda_{\text{Tj}} \max\Bigl(0,\, \tfrac{\min(s_\tau^+, s_\tau^-)}{\delta_\tau} - 1\Bigr) \Bigr]
+\]
+\textbf{Trajectory-level only.} Uses the \emph{raw} signed deviation
+$s_\tau$ (no clip on the advantage term) plus a soft penalty that activates
+when $\min(s^+, s^-) > \delta_\tau$.
+
+\begin{lstlisting}[caption={Objective 4 --- penalty only}]
+penalty = torch.clamp(
+    torch.minimum(s_pos_tau, s_neg_tau) / config.bspo_delta_tau - 1.0,
+    min=0.0,
+)                                                                        # (B,)
+per_traj = s_tau * A_tau - config.bspo_lambda_tj * penalty               # (B,)
+
+per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)             # (B, T)
+loss = -agg_loss(per_token_obj, response_mask, loss_agg_mode)
+\end{lstlisting}
+
+\subsection{Objective 3 --- Wasserstein Penalty (clipped $\Delta^{(W)}$ + penalty)}
+\[
+\hat J = \widehat{\mathbb{E}}
+  \Bigl[ \Delta_\tau^{(\text{W})} \hat A_\tau
+       - \lambda_{\text{Tj}} \max\Bigl(0,\, \tfrac{\min(s_\tau^+, s_\tau^-)}{\delta_\tau} - 1\Bigr) \Bigr]
+\]
+\textbf{Trajectory-level only.} Clipped advantage term plus the same soft
+penalty as Objective 4.
+
+\begin{lstlisting}[caption={Objective 3 --- W + penalty, traj only}]
+delta_tau_w = delta_w(s_pos_tau, s_neg_tau, config.bspo_delta_tau)       # (B,)
+penalty = torch.clamp(
+    torch.minimum(s_pos_tau, s_neg_tau) / config.bspo_delta_tau - 1.0,
+    min=0.0,
+)                                                                        # (B,)
+per_traj = delta_tau_w * A_tau - config.bspo_lambda_tj * penalty         # (B,)
+
+per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)             # (B, T)
+loss = -agg_loss(per_token_obj, response_mask, loss_agg_mode)
+\end{lstlisting}
+
+\subsection{Objective 2 --- Strict Wasserstein (full $\tau$/$g$/dom hierarchy)}
+\begin{align*}
+\hat J =\ & \widehat{\mathbb{E}}_{\tau \sim g \sim \text{dom}}
+  \bigl[\Delta_{\text{dom}}^{(\text{W})} \hat A_{\text{dom}}
+      + \Delta_g^{(\text{W})} \hat A_g
+      + \Delta_\tau^{(\text{W})} \hat A_\tau\bigr]
+\end{align*}
+\textbf{Full hierarchy.} Needs \verb|group_ids| and \verb|domain_ids| at
+loss-compute time (main integration challenge --- see Question \#6).
+
+\begin{lstlisting}[caption={Objective 2 --- strict Wasserstein with 3-level aggregation}]
+# Per-traj
+delta_tau_w = delta_w(s_pos_tau, s_neg_tau, config.bspo_delta_tau)        # (B,)
+
+# Per-group (broadcast back to per-traj)
+s_pos_g = scatter_mean(s_pos_tau, group_ids, G)[group_ids]                # (B,)
+s_neg_g = scatter_mean(s_neg_tau, group_ids, G)[group_ids]                # (B,)
+A_g     = scatter_mean(A_tau,      group_ids, G)[group_ids]               # (B,)
+delta_g_w = delta_w(s_pos_g, s_neg_g, config.bspo_delta_g)                # (B,)
+
+# Per-domain (broadcast back to per-traj)
+s_pos_d = scatter_mean(s_pos_tau, domain_ids, D)[domain_ids]              # (B,)
+s_neg_d = scatter_mean(s_neg_tau, domain_ids, D)[domain_ids]              # (B,)
+A_d     = scatter_mean(A_tau,      domain_ids, D)[domain_ids]             # (B,)
+delta_dom_w = delta_w(s_pos_d, s_neg_d, config.bspo_delta_dom)            # (B,)
+
+per_traj = (delta_dom_w * A_d) + (delta_g_w * A_g) + (delta_tau_w * A_tau)  # (B,)
+
+per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)              # (B, T)
+loss = -agg_loss(per_token_obj, response_mask, loss_agg_mode)
+\end{lstlisting}
+
+\section{Reference block: motivation only (not implemented)}
+
+\textbf{Q2 answer}: the ${}^{(\text{GSPO})}\tilde\delta_\tau$ expression
+below has \emph{nothing to do with the GSPO loss}. It was written in the
+same visual block purely as a reminder that $\delta$-hparams here should
+be \emph{comparable in magnitude} to GSPO's. The four objectives do not
+use it.
+
+The definition of $\hat d(z)$ is the exact implementation of $\hat d(\text{dom})$,
+$\hat d(g)$, etc.: the mean-absolute-deviation of rewards for
+trajectories drawn from the distribution $\mathcal{P}(z)$.
+
+\textbf{Single-domain simplification}: we are only implementing the
+single-domain case for now. Any term that is constant across a
+single-domain batch is dropped. In particular:
+
+\begin{itemize}
+\item $\hat d(\text{dom})$, $R_{\text{max res}}(\text{dom})$, and
+  $\delta_D$ collapse to scalars constant over the batch and drop from
+  any gradient.
+\item Only $\hat d(g)$ and per-trajectory terms retain per-sample
+  variation, but since $\hat d$ itself does not appear in the 4
+  objectives, we do not need to compute it at all in the loss function.
+\end{itemize}
+
+\begin{align*}
+\hat d(z) &= \mathbb{E}_{\tau \sim \mathcal{P}(z)}\bigl[ |R(\tau) - \mathbb{E}_{\tau'\sim\mathcal{P}(z)}[R]| \bigr]
+             \quad \text{(definition only --- not in any implemented loss)}
+\end{align*}
+
+No pseudo code for this section --- nothing here enters the gradient
+path of Objectives 1--4 in the single-domain implementation.
+
+\section{Single-domain consequence for Objective 2 (rigorous derivation)}
+
+\textbf{Claim.} Under verl's GRPO advantage (full-group mean baseline,
+full-group std) and single-domain batches, Objective 2 (Strict Wasserstein)
+is \emph{identically equal} to Objective 3 with $\lambda_{\text{Tj}} = 0$.
+
+\textbf{Verl's GRPO advantage} (from
+\texttt{verl/trainer/ppo/core\_algos.py:267-326}, function
+\texttt{compute\_grpo\_outcome\_advantage}):
+
+\begin{align}
+R_\tau &:= \sum_{t} \text{token\_level\_reward}_{\tau,t} \quad \text{(scalar per trajectory)} \\
+\bar R_g &:= \frac{1}{n}\sum_{\tau \in g} R_\tau \quad \text{(\texttt{torch.mean}, full group)} \\
+\sigma_g &:= \operatorname{std}(\{R_\tau : \tau \in g\}) \quad \text{(\texttt{torch.std}, full group)} \\
+\hat A_\tau &:= \frac{R_\tau - \bar R_g}{\sigma_g + \varepsilon} \quad \text{(broadcast to every token in \(\tau\))}
+\end{align}
+
+\textbf{Derivation.} By definition of $\bar R_g$:
+\begin{align}
+\sum_{\tau \in g} (R_\tau - \bar R_g)
+&= \sum_{\tau \in g} R_\tau - n \bar R_g \\
+&= n \bar R_g - n \bar R_g = 0 \quad \text{(exactly)}
+\end{align}
+
+Therefore:
+\begin{align}
+\sum_{\tau \in g} \hat A_\tau
+&= \frac{1}{\sigma_g + \varepsilon} \sum_{\tau \in g} (R_\tau - \bar R_g)
+ = \frac{0}{\sigma_g + \varepsilon} = 0 \quad \text{(exactly)}
+\end{align}
+
+Consequently:
+\begin{align}
+\hat A_g     &:= \frac{1}{n} \sum_{\tau \in g} \hat A_\tau \equiv 0 \\
+\hat A_{\text{dom}} &:= \frac{1}{G_d} \sum_{g \in \text{dom}} \hat A_g \equiv 0
+\end{align}
+
+\textbf{Substitute into Objective 2:}
+\begin{align}
+\hat J_{\text{strict W}}
+&= \widehat{\mathbb{E}}_\tau \bigl[\Delta_{\text{dom}}^{(W)} \hat A_{\text{dom}}
+        + \Delta_g^{(W)} \hat A_g
+        + \Delta_\tau^{(W)} \hat A_\tau \bigr] \\
+&= \widehat{\mathbb{E}}_\tau \bigl[\Delta_{\text{dom}}^{(W)} \cdot 0
+        + \Delta_g^{(W)} \cdot 0
+        + \Delta_\tau^{(W)} \hat A_\tau \bigr] \\
+&= \widehat{\mathbb{E}}_\tau \bigl[\Delta_\tau^{(W)} \hat A_\tau \bigr]
+\end{align}
+
+Objective 3 at $\lambda_{\text{Tj}} = 0$:
+\begin{align}
+\hat J_{\text{W penalty}}\bigm|_{\lambda=0}
+&= \widehat{\mathbb{E}}_\tau \bigl[\Delta_\tau^{(W)} \hat A_\tau - 0\bigr]
+ = \widehat{\mathbb{E}}_\tau \bigl[\Delta_\tau^{(W)} \hat A_\tau \bigr]
+\end{align}
+
+\textbf{Conclusion.} $\hat J_{\text{strict W}} \equiv \hat J_{\text{W penalty}}\bigm|_{\lambda=0}$ as an identity (not an approximation), for any single-domain batch under verl's GRPO advantage with full-group mean baseline.
+
+\textbf{Implication for implementation.} Under the "math always wins" rule:
+Objective 2 is redundant in the single-domain case --- any run we do with
+$\lambda_{\text{Tj}} = 0$ in Objective 3 already covers Objective 2
+exactly. The effective ablation set is:
+\[
+\{\text{Obj 1}, \ \text{Obj 3 (with }\lambda\in\{0, 0.001, 0.005\}\text{)}, \ \text{Obj 4 (with }\lambda\in\{0, 0.001, 0.005\}\text{)}\}
+\]
+We do not need to implement the group / domain aggregation machinery at
+all for the first ablation round; the $\lambda=0$ point of Obj 3 already
+gives the "Strict Wasserstein" result. Group-level plumbing can be added
+later when multi-domain is reintroduced.
+
+\textbf{When the reduction breaks.} If we change the baseline (e.g. to
+leave-one-out $\bar R_g^{-\tau} = \frac{1}{n-1}\sum_{\tau' \ne \tau} R_{\tau'}$)
+then $\sum_{\tau \in g}(R_\tau - \bar R_g^{-\tau}) \ne 0$ in general, and
+$\hat A_g$ becomes non-zero. For now we stay on verl's default full-group
+baseline.
+
+\section{Q6 best-practice design (from \texttt{stash@\{0\}} "group loss")}
+
+Reading the user's stash \texttt{stash@\{0\}: group loss} shows an
+already-tested pattern for injecting group info into the loss function
+without breaking the signature. Applied to BSPO:
+
+\subsection{Loss-function signature (minimally invasive)}
+
+\begin{lstlisting}[caption={BSPO loss signature --- same kwarg pattern as stash}]
+@register_policy_loss("bspo")
+def compute_policy_loss_bspo(
+    old_log_prob: torch.Tensor,
+    log_prob:      torch.Tensor,
+    advantages:    torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",   # Q7: math-correct choice
+    config:        Optional[ActorConfig] = None,
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    # Optional kwargs --- only consumed by variants that need them
+    trajectory_rewards: Optional[torch.Tensor] = None,   # (B,)
+    group_ids:          Optional[torch.Tensor] = None,   # (B,)
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    ...
+\end{lstlisting}
+
+For the single-domain ablation round (per Q13), neither \texttt{trajectory\_rewards}
+nor \texttt{group\_ids} is needed --- Obj 1, Obj 3, Obj 4 all live at the
+trajectory level. The kwargs are in the signature for forward compatibility
+with a future multi-domain Obj 2.
+
+\subsection{Upstream plumbing (if/when needed)}
+
+Stash's pattern for dp\_actor.py (verbatim, with variable renames):
+
+\begin{lstlisting}[caption={dp\_actor.py hook --- from stash@\{0\}}]
+# When BSPO needs group structure (future multi-domain):
+if loss_mode == "bspo" and config.get("bspo_need_groups", False):
+    tlr  = model_inputs.get("token_level_rewards", None)
+    uids = model_inputs.get("uid", None)
+    assert tlr is not None and uids is not None
+    trajectory_rewards = (tlr * response_mask).sum(dim=-1)     # (B,)
+    group_ids = as_torch_index(uids, device=log_prob.device)   # (B,)
+    extra_kwargs["trajectory_rewards"] = trajectory_rewards
+    extra_kwargs["group_ids"]          = group_ids
+
+pg_loss, pg_metrics = policy_loss_fn(
+    old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
+    response_mask=response_mask, loss_agg_mode=loss_agg_mode,
+    config=self.config, rollout_is_weights=rollout_is_weights,
+    **extra_kwargs,
+)
+\end{lstlisting}
+
+\texttt{megatron\_actor.py} needs a mirror hook (the stash also has a
+fallback that hashes the prompt tokens when \texttt{uid} is absent, since
+micro-batching may drop non-tensor fields).
+
+\textbf{For the single-domain first round: the above hooks are not needed.}
+BSPO's Obj 1/3/4 read only \texttt{old\_log\_prob}, \texttt{log\_prob},
+\texttt{advantages}, \texttt{response\_mask}, \texttt{config}. Zero
+changes to actor.py.
+
+\section{Loss-aggregation math (Q7)}
+
+The \texttt{bisim\_eqs.tex} objective is written as
+$\widehat{\mathbb{E}}_{\tau \sim g \sim \text{dom}}[\,\cdot\,]$ --- an
+expectation over trajectories in the empirical batch. Concretely:
+\[
+\widehat{\mathbb{E}}_\tau[f(\tau)] = \frac{1}{B} \sum_{\tau = 1}^{B} f(\tau)
+\]
+Each trajectory contributes equally, regardless of its token count $T_\tau$.
+
+For verl's \texttt{agg\_loss(per\_token\_obj, mask, mode)}:
+\begin{itemize}
+\item \texttt{token-mean}: $\frac{\sum_{\tau,t} L_{\tau,t} \cdot \text{mask}}{\sum \text{mask}} = \frac{\sum_\tau T_\tau \cdot f(\tau)}{\sum_\tau T_\tau}$. \textbf{Length-weighted.} Does not match $\widehat{\mathbb{E}}_\tau$ in general.
+\item \texttt{seq-mean-token-mean}: $\frac{1}{B}\sum_\tau \left[\frac{\sum_t L_{\tau,t} \cdot \text{mask}}{T_\tau}\right] = \frac{1}{B}\sum_\tau f(\tau)$. \textbf{Matches.}
+\item \texttt{compute scalar directly}: mathematically identical to the seq-mean form above, just skips \texttt{agg\_loss}.
+\end{itemize}
+
+\textbf{Verdict (per user's "math always wins" rule):} only
+\texttt{seq-mean-token-mean} is correct. No sweep needed on this axis. BSPO
+will hard-code \texttt{loss\_agg\_mode = "seq-mean-token-mean"} the same way
+FACPO does.
+
+\section{Hyperparameter list (proposed, updated per user answers)}
+
+\begin{tabular}{l|l|l}
+\textbf{Name} & \textbf{Default} & \textbf{Appears in} \\
+\hline
+\texttt{bspo\_variant}    & \texttt{simplest} / \texttt{w\_penalty} / \texttt{w\_penalty\_only} & selects Obj 1 / 3 / 4. Obj 2 dropped (Q13 reduction). \\
+\texttt{bspo\_delta}      & 0.2 & single scalar clip threshold $\delta_\tau$ (per Q3: one constant, no group/domain split) \\
+\texttt{bspo\_lambda\_tj} & swept \{0, 0.001, 0.005\} (Q4) & Obj 3, 4 --- soft penalty coeff \\
+\end{tabular}
+
+\medskip
+\noindent
+$s^\pm$ form: \textbf{arithmetic} (Q1), always. No sweep axis.
+
+\noindent
+\texttt{loss\_agg\_mode}: hard-coded to \texttt{seq-mean-token-mean} (Q7 math verdict).
+
+\noindent
+\texttt{sign(s)} treated as detached constant (Q8).
+
+\noindent
+\texttt{rollout\_is\_weights}: ignored in BSPO (Q9).
+
+\section{Ablation plan (per Q10 --- differentiate objectives first)}
+
+\textbf{Phase 1 --- identify winning objective (smallest differentiating set).}
+
+Three runs, default hparams:
+\begin{itemize}
+\item \texttt{bspo\_variant=simplest}, $\delta=0.2$ (Obj 1)
+\item \texttt{bspo\_variant=w\_penalty}, $\delta=0.2$, $\lambda=0.001$ (Obj 3)
+\item \texttt{bspo\_variant=w\_penalty\_only}, $\delta=0.2$, $\lambda=0.001$ (Obj 4)
+\end{itemize}
+
+(Obj 2 dropped per Q13 reduction.)
+
+\textbf{Phase 2 --- sweep hparams of the Phase 1 winner.}
+
+\begin{itemize}
+\item If winner is Obj 1: sweep $\delta \in \{0.1, 0.2, 0.4\}$. 3 runs.
+\item If winner is Obj 3 / Obj 4: sweep $(\delta, \lambda) \in \{0.1, 0.2, 0.4\} \times \{0, 0.001, 0.005\}$. 9 runs (Q4).
+  The $\lambda = 0$ anchor of Obj 3 exactly reproduces the dropped Obj 2
+  (Q13 reduction), so it serves both as an ablation point and as
+  coverage for the Strict Wasserstein variant.
+\end{itemize}
+
+\end{document}
