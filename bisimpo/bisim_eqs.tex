@@ -1,0 +1,56 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\title{2026 Npis}
+\author{YAREN ZHANG}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+ratios deviation:
+\begin{align*}
+{}^{(\text{GSPO})}\tilde{\delta}_\tau 
+&= \frac{\hat d(dom)\,\delta_{\text{D}}}{R_{\max res}(dom)}
+   \left( \frac{\hat d_{\operatorname{Grp}}(g)}{\sum_{g':dom} \hat d_{\operatorname{Grp}}(g')^2} \right)
+   \frac{\delta_{\operatorname{Tj}}}{T_g} \\
+&\doteq \frac{1}{\sum_{g':dom} \hat d_{16}(g')^2}\,
+   \hat d_{128\times 16}(dom)\,\hat d_{16}(g)\,\delta_{\operatorname{sing}} \\
+\hat d(z) &= \mathbb{E}_{\tau \sim \mathcal{P}(z)}\bigl[\,|R(\tau) - \mathbb{E}_{\tau'\sim \mathcal{P}(z)}[R]|\,\bigr] \\
+z &= \tau \text{ in the following:} \\
+\Delta_z^{(\text{W})}   &= \operatorname{sign}(s_z)\,\operatorname{clip}(\min(s_z^+, s_z^-), \delta_z) \\
+\Delta_z^{(\text{reg})} &= \operatorname{clip}(s_z^+, \delta_z) - \operatorname{clip}(s_z^-, \delta_z) \\
+s_\tau &= s_\tau^+ - s_\tau^- \\
+s_\tau^+ &:= \frac{1}{|\tau|}\sum_{t\in\tau}\max(r_t - 1, 0), \qquad
+s_\tau^- := \frac{1}{|\tau|}\sum_{t\in\tau}\max(1 - r_t, 0)
+\end{align*}
+
+Objectives
+\begin{align*}
+\text{Simplest baseline: }\hat J_{128\times 16}
+  &= \widehat{\mathbb{E}}_{\tau\sim g\sim dom}\bigl[\Delta_\tau^{(\text{reg})}\hat A_\tau\bigr] \\
+  &= \widehat{\mathbb{E}}_{\tau\sim g\sim dom}\bigl[(\operatorname{clip}(s_z^+,\delta_z) - \operatorname{clip}(s_z^-,\delta_z))\hat A_\tau\bigr] \\
+\text{Strict Wasserstein: }\hat J
+  &= \widehat{\mathbb{E}}_{\tau\sim g\sim dom}\bigl[\operatorname{sgn}(s_{dom})\operatorname{clip}(\min(s_{dom}^+,s_{dom}^-),\delta_{dom})\hat A_{dom} \\
+  &\qquad + \operatorname{sgn}(s_g)\operatorname{clip}(\min(s_g^+,s_g^-),\delta_g)\hat A_g \\
+  &\qquad + \operatorname{sgn}(s_\tau)\operatorname{clip}(\min(s_\tau^+,s_\tau^-),\delta_\tau)\hat A_\tau\bigr] \\
+  &\equiv \widehat{\mathbb{E}}_{\tau\sim g\sim dom}\bigl[\Delta_{dom}^{(\text{W})}\hat A_{dom} + \Delta_g^{(\text{W})}\hat A_g + \Delta_\tau^{(\text{W})}\hat A_\tau\bigr] \\
+\text{Wasserstein Penalty: }\hat J
+  &= \widehat{\mathbb{E}}_{\tau\sim g\sim dom}\Bigl[\Delta_\tau^{(\text{W})}\hat A_\tau - \lambda_{\operatorname{Tj}}\max\Bigl(0,\tfrac{\min(s_\tau^+,s_\tau^-)}{\delta_\tau} - 1\Bigr)\Bigr] \\
+\text{Wasserstein Penalty only: }\hat J
+  &= \widehat{\mathbb{E}}_{\tau\sim g\sim dom}\Bigl[s_\tau \hat A_\tau - \lambda_{\operatorname{Tj}}\max\Bigl(0,\tfrac{\min(s_\tau^+,s_\tau^-)}{\delta_\tau} - 1\Bigr)\Bigr]
+\end{align*}
+
+Advantages
+\begin{align*}
+\lambda_{\operatorname{Tj}} &= 0.001 \text{ or } 1 \\
+\hat A_{dom} &= \tfrac{16}{128}\sum_{g:dom}\hat A_g, \qquad
+\hat A_g = \tfrac{1}{16}\sum_{\tau:g}\hat A_\tau, \qquad
+\hat A_\tau = \frac{R_\tau - \bar R_g}{\sigma_g}
+\end{align*}
+
+\end{document}

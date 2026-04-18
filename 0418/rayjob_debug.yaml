@@ -1,0 +1,150 @@
+# 0418 debug RayJob — parameterizes node count for sharding/rollout experiments.
+#
+# DO NOT use this for production. Use submit/rayjob.yaml instead.
+#
+# Submitted via ./submit_debug.sh <combo> <nnodes> [extra Hydra overrides...]
+#   ./submit_debug.sh cdbg5 16                                   # P0 baseline (current)
+#   ./submit_debug.sh cdbg5 8                                    # P1 (8-node sharding test)
+#   ./submit_debug.sh cdbg5 4                                    # P2 (4-node sharding test)
+#   ./submit_debug.sh cdbg5 8 'data.val_max_samples=32'          # with override
+#
+# Placeholders resolved at submit time via envsubst (whitelist: COMBO_ID, NNODES,
+# WORKER_REPLICAS, EXTRA_OVERRIDES). Ensures Volcano gang sees a PodGroup with
+# minMember = 1 + WORKER_REPLICAS.
+#
+# KubeRay + Volcano gang scheduling (per voltest/submit/rayjob.yaml pattern):
+#   - No kueue.x-k8s.io label
+#   - No manual schedulerName on pods — operator sets it automatically
+#   - replicas = minReplicas = maxReplicas → stable PodGroup sizing
+
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  generateName: bra40-dbg-${COMBO_ID}-${NNODES}n-
+  namespace: default
+  labels:
+    submitter: lichang93
+    framework-type: Ray
+    training-type: 40bra-dbg
+    combo_id: "${COMBO_ID}"
+    node_count: "${NNODES}"
+spec:
+  entrypoint: bash /root/myCodeLab/host/verl/my_scripts/k8s/run_40bra_k8s_16node_single_domain.sh ${COMBO_ID} trainer.nnodes=${NNODES} ${EXTRA_OVERRIDES}
+  shutdownAfterJobFinishes: true
+  # Short ttl for debug runs — pipeline.sh explicitly deletes the RayJob on
+  # the normal path, so 120s is only a safety net if pipeline.sh crashes.
+  # A longer ttl would block the next gang in the queue unnecessarily.
+  ttlSecondsAfterFinished: 120
+
+  rayClusterSpec:
+    rayVersion: '2.54.0'
+
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: '0.0.0.0'
+        num-gpus: '8'
+      template:
+        metadata:
+          labels:
+            training-type: 40bra-dbg
+            combo_id: "${COMBO_ID}"
+            node_count: "${NNODES}"
+        spec:
+          # schedulerName: volcano intentionally NOT set — kuberay-operator sets it.
+          imagePullSecrets:
+          - name: aliyunsecret
+          containers:
+          - name: ray-head
+            image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+            imagePullPolicy: IfNotPresent
+            env: &full_env
+            - {name: NCCL_SOCKET_IFNAME,              value: eth0}
+            - {name: NCCL_IB_GID_INDEX,               value: '5'}
+            - {name: NCCL_IB_TC,                      value: '96'}
+            - {name: NCCL_IB_HCA,                     value: 'mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1,mlx5_14:1,mlx5_15:1,mlx5_16:1,mlx5_17:1'}
+            - {name: NCCL_IB_TIMEOUT,                 value: '22'}
+            - {name: NCCL_IB_RETRY_CNT,               value: '13'}
+            - {name: NCCL_IB_ADAPTIVE_ROUTING,        value: '1'}
+            - {name: NCCL_BUFFSIZE,                   value: '16777216'}
+            - {name: NCCL_P2P_NET_CHUNKSIZE,          value: '524288'}
+            - {name: NCCL_CROSS_NIC,                  value: '1'}
+            - {name: NCCL_MIN_NCHANNELS,              value: '32'}
+            - {name: NCCL_IB_QPS_PER_CONNECTION,      value: '8'}
+            - {name: NCCL_NVLS_ENABLE,                value: '0'}
+            - {name: NVSHMEM_IB_GID_INDEX,            value: '5'}
+            - {name: NVSHMEM_IB_TRAFFIC_CLASS,        value: '96'}
+            - {name: NVSHMEM_IBGDA_NIC_HANDLER,       value: gpu}
+            - {name: NVSHMEM_IB_ENABLE_IBGDA,         value: '1'}
+            - {name: NVSHMEM_IBGDA_ENABLE_MULTI_PORT, value: '1'}
+            - {name: NVSHMEM_HCA_LIST,                value: 'mlx5_10,mlx5_11,mlx5_12,mlx5_13,mlx5_14,mlx5_15,mlx5_16,mlx5_17'}
+            - {name: MELLANOX_VISIBLE_DEVICES,        value: '10,11,12,13,14,15,16,17'}
+            - {name: UCX_NET_DEVICES,                 value: eth0}
+            - {name: VLLM_ATTENTION_BACKEND,          value: CUTLASS_MLA}
+            - {name: VLLM_USE_V1,                     value: '1'}
+            - {name: NVTE_FUSED_ATTN,                 value: '1'}
+            - {name: CUDA_DEVICE_MAX_CONNECTIONS,     value: '1'}
+            - {name: PYTHONPYCACHEPREFIX,             value: /tmp/pycache}
+            - {name: RAY_USAGE_STATS_ENABLED,         value: '0'}
+            - {name: RAY_ENABLE_OPENTELEMETRY,        value: '0'}
+            - {name: TORCH_NCCL_ASYNC_ERROR_HANDLING, value: '1'}
+            - {name: VERL_PERF_LOG,                   value: '1'}   # enable 0418 perf instrumentation
+            - {name: DEBUG_LABEL,                     value: "${DEBUG_LABEL}"}  # 0418 per-run human label, written as label.txt
+            resources:
+              requests:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+              limits:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+            securityContext:
+              capabilities:
+                add: [IPC_LOCK]
+            volumeMounts: &full_mounts
+            - {name: afs-pvc, mountPath: /root/myCodeLab/host, subPath: lichang93/st_verl_dockerfile}
+            - {name: afs-pvc, mountPath: /root/myCodeLab/host/downloads, subPath: lichang93/downloads}
+            - {name: shm,     mountPath: /dev/shm}
+          volumes: &full_volumes
+          - {name: afs-pvc, persistentVolumeClaim: {claimName: pvc-jdwzpnv}}
+          - {name: shm,     emptyDir: {medium: Memory, sizeLimit: 60Gi}}
+
+    workerGroupSpecs:
+    - groupName: workers
+      replicas: ${WORKER_REPLICAS}
+      minReplicas: ${WORKER_REPLICAS}
+      maxReplicas: ${WORKER_REPLICAS}
+      rayStartParams:
+        num-gpus: '8'
+      template:
+        metadata:
+          labels:
+            training-type: 40bra-dbg
+            combo_id: "${COMBO_ID}"
+            node_count: "${NNODES}"
+        spec:
+          imagePullSecrets:
+          - name: aliyunsecret
+          containers:
+          - name: ray-worker
+            image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev
+            imagePullPolicy: IfNotPresent
+            env: *full_env
+            resources:
+              requests:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+              limits:
+                nvidia.com/gpu: '8'
+                rdma-training/roce: '1'
+                cpu: '176'
+                memory: 1920Gi
+            securityContext:
+              capabilities:
+                add: [IPC_LOCK]
+            volumeMounts: *full_mounts
+          volumes: *full_volumes
