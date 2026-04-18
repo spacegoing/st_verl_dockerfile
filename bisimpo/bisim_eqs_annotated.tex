@@ -133,71 +133,45 @@ def delta_w(s_pos: Tensor, s_neg: Tensor, delta: float) -> Tensor:
 
 \section{Advantage hierarchy (GRPO-style)}
 
-\subsection{Trajectory advantage}
+\subsection{Trajectory advantage (shipped)}
 \[
-\hat A_\tau = \frac{R_\tau - \bar R_g}{\sigma_g}
+\hat A_\tau = \frac{R_\tau - \bar R_g}{\sigma_g + \varepsilon}
 \]
-In verl this is \emph{already} computed upstream and broadcast per-token in
-the \texttt{advantages} tensor. To recover a per-trajectory scalar:
+In verl this is computed upstream (function \texttt{compute\_grpo\_outcome\_advantage}
+at \texttt{core\_algos.py:267}) and broadcast per-token into the
+\texttt{advantages} tensor. The shipped BSPO loss recovers a
+per-trajectory scalar with:
 
 \begin{lstlisting}
 # GRPO advantage is constant along t within a trajectory; take any valid token
 A_tau = (advantages * response_mask).sum(-1) / T_tau         # (B,)
 \end{lstlisting}
 
-\subsection{Group advantage}
+\subsection{Group / domain advantage (NOT shipped for single-domain)}
+
+The math definitions are retained here for reference; the implementation
+intentionally does \emph{not} compute them. Per the Q13 rigorous derivation
+in \S7, $\hat A_g \equiv 0$ and $\hat A_\text{dom} \equiv 0$ under verl's
+GRPO full-group baseline, so the corresponding terms in Objective 2 vanish
+identically. The $\lambda_{\text{Tj}} = 0$ anchor of the Objective 3 sweep
+already covers Objective 2.
+
 \[
-\hat A_g = \frac{1}{16} \sum_{\tau \in g} \hat A_\tau
+\hat A_g = \frac{1}{n} \sum_{\tau \in g} \hat A_\tau,
+\qquad
+\hat A_{\text{dom}} = \frac{1}{G_d} \sum_{g : \text{dom}} \hat A_g
 \]
-Assumes $n = 16$ rollouts per group (verl's \verb|rollout.n|).
 
-\begin{lstlisting}
-# group_ids: (B,) with values in [0, G)
-def scatter_mean(vals: Tensor, ids: Tensor, size: int) -> Tensor:
-    """mean of vals grouped by ids; returns (size,)"""
-    sums  = torch.zeros(size, device=vals.device, dtype=vals.dtype).scatter_add_(0, ids, vals)
-    counts = torch.zeros(size, device=vals.device, dtype=vals.dtype).scatter_add_(0, ids, torch.ones_like(vals))
-    return sums / counts.clamp(min=1)
-
-G = group_ids.max().item() + 1
-A_g_by_group = scatter_mean(A_tau, group_ids, G)             # (G,)
-A_g_per_traj = A_g_by_group[group_ids]                       # (B,) broadcast back
-\end{lstlisting}
-
-\subsection{Domain advantage}
 \[
-\hat A_{\text{dom}} = \frac{16}{128} \sum_{g : \text{dom}} \hat A_g
+s_g^\pm = \frac{1}{n} \sum_{\tau \in g} s_\tau^\pm,
+\qquad
+s_\text{dom}^\pm = \frac{1}{G_d} \sum_{g \in \text{dom}} s_g^\pm
 \]
-Interpreted as ``mean of $\hat A_g$ over the groups belonging to this domain''
---- the $\frac{16}{128}$ factor is $\frac{1}{G/D}$ for the common case
-$G = 128, D = 1$; more generally it is the mean coefficient.
-\textbf{SEE QUESTION \#5.}
 
-\begin{lstlisting}
-D = domain_ids.max().item() + 1
-# Distinct group_id within each domain
-# In practice group_id → domain_id mapping is already available from the data pipeline.
-group_to_dom = ...                                           # (G,)
-A_dom_by_dom = scatter_mean(A_g_by_group, group_to_dom, D)   # (D,)
-A_dom_per_traj = A_dom_by_dom[domain_ids]                    # (B,)
-\end{lstlisting}
-
-\subsection{Group- and domain-level $s_g^\pm, s_{\text{dom}}^\pm$}
-Parallel to $\hat A_g, \hat A_{\text{dom}}$ but averaging the per-trajectory
-deviations:
-
-\begin{lstlisting}
-s_pos_g_per_traj = scatter_mean(s_pos_tau, group_ids, G)[group_ids]       # (B,)
-s_neg_g_per_traj = scatter_mean(s_neg_tau, group_ids, G)[group_ids]       # (B,)
-
-s_pos_dom_per_traj = scatter_mean(s_pos_tau, domain_ids, D)[domain_ids]   # (B,)
-s_neg_dom_per_traj = scatter_mean(s_neg_tau, domain_ids, D)[domain_ids]   # (B,)
-
-# Then:
-delta_tau_w = delta_w(s_pos_tau, s_neg_tau, delta_tau)                    # (B,)
-delta_g_w   = delta_w(s_pos_g_per_traj, s_neg_g_per_traj, delta_g)        # (B,)
-delta_dom_w = delta_w(s_pos_dom_per_traj, s_neg_dom_per_traj, delta_dom)  # (B,)
-\end{lstlisting}
+If multi-domain is reintroduced, the stash pattern (\S8) shows the upstream
+hooks needed to bring \texttt{group\_ids} and \texttt{domain\_ids} into the
+loss function; a \texttt{scatter\_mean} helper then builds the aggregates.
+The current shipped code does not touch these paths.
 
 \section{Four objective variants}
 
@@ -263,37 +237,26 @@ per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)             # (B, T
 loss = -agg_loss(per_token_obj, response_mask, loss_agg_mode)
 \end{lstlisting}
 
-\subsection{Objective 2 --- Strict Wasserstein (full $\tau$/$g$/dom hierarchy)}
+\subsection{Objective 2 --- Strict Wasserstein (NOT implemented; reduces to Obj 3 at $\lambda=0$)}
 \begin{align*}
 \hat J =\ & \widehat{\mathbb{E}}_{\tau \sim g \sim \text{dom}}
   \bigl[\Delta_{\text{dom}}^{(\text{W})} \hat A_{\text{dom}}
       + \Delta_g^{(\text{W})} \hat A_g
       + \Delta_\tau^{(\text{W})} \hat A_\tau\bigr]
 \end{align*}
-\textbf{Full hierarchy.} Needs \verb|group_ids| and \verb|domain_ids| at
-loss-compute time (main integration challenge --- see Question \#6).
 
-\begin{lstlisting}[caption={Objective 2 --- strict Wasserstein with 3-level aggregation}]
-# Per-traj
-delta_tau_w = delta_w(s_pos_tau, s_neg_tau, config.bspo_delta_tau)        # (B,)
+\textbf{Why not implemented.} Under verl's GRPO full-group baseline,
+$\hat A_g \equiv 0$ and $\hat A_\text{dom} \equiv 0$ (Q13 derivation, \S7).
+The strict-Wasserstein objective therefore collapses to
+$\widehat{\mathbb{E}}_\tau [\Delta_\tau^{(W)} \hat A_\tau]$, which is
+exactly Objective 3 with $\lambda_{\text{Tj}} = 0$. The sweep plan
+includes $\lambda = 0$ as an anchor, so Obj 2's gradient signal is
+covered for free without any 3-level aggregation code.
 
-# Per-group (broadcast back to per-traj)
-s_pos_g = scatter_mean(s_pos_tau, group_ids, G)[group_ids]                # (B,)
-s_neg_g = scatter_mean(s_neg_tau, group_ids, G)[group_ids]                # (B,)
-A_g     = scatter_mean(A_tau,      group_ids, G)[group_ids]               # (B,)
-delta_g_w = delta_w(s_pos_g, s_neg_g, config.bspo_delta_g)                # (B,)
-
-# Per-domain (broadcast back to per-traj)
-s_pos_d = scatter_mean(s_pos_tau, domain_ids, D)[domain_ids]              # (B,)
-s_neg_d = scatter_mean(s_neg_tau, domain_ids, D)[domain_ids]              # (B,)
-A_d     = scatter_mean(A_tau,      domain_ids, D)[domain_ids]             # (B,)
-delta_dom_w = delta_w(s_pos_d, s_neg_d, config.bspo_delta_dom)            # (B,)
-
-per_traj = (delta_dom_w * A_d) + (delta_g_w * A_g) + (delta_tau_w * A_tau)  # (B,)
-
-per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)              # (B, T)
-loss = -agg_loss(per_token_obj, response_mask, loss_agg_mode)
-\end{lstlisting}
+No pseudo code is shipped for this objective in the single-domain
+round. If multi-domain is reintroduced, the 3-level aggregation
+template appears in \S4.2 (group/domain advantage) and \S8 (upstream
+plumbing hooks from the stash).
 
 \section{Reference block: motivation only (not implemented)}
 
@@ -404,67 +367,40 @@ then $\sum_{\tau \in g}(R_\tau - \bar R_g^{-\tau}) \ne 0$ in general, and
 $\hat A_g$ becomes non-zero. For now we stay on verl's default full-group
 baseline.
 
-\section{Q6 best-practice design (from \texttt{stash@\{0\}} "group loss")}
+\section{Shipped signature (single-domain, Obj 1/3/4)}
 
-Reading the user's stash \texttt{stash@\{0\}: group loss} shows an
-already-tested pattern for injecting group info into the loss function
-without breaking the signature. Applied to BSPO:
+The code that actually ships (\texttt{verl/verl/trainer/ppo/core\_algos.py}):
 
-\subsection{Loss-function signature (minimally invasive)}
-
-\begin{lstlisting}[caption={BSPO loss signature --- same kwarg pattern as stash}]
+\begin{lstlisting}[caption={BSPO loss signature as shipped}]
 @register_policy_loss("bspo")
 def compute_policy_loss_bspo(
-    old_log_prob: torch.Tensor,
-    log_prob:      torch.Tensor,
-    advantages:    torch.Tensor,
-    response_mask: torch.Tensor,
-    loss_agg_mode: str = "seq-mean-token-mean",   # Q7: math-correct choice
+    old_log_prob: torch.Tensor,         # (B, T)
+    log_prob:      torch.Tensor,         # (B, T)
+    advantages:    torch.Tensor,         # (B, T), GRPO-normalized constant-along-t
+    response_mask: torch.Tensor,         # (B, T)
+    loss_agg_mode: str = "seq-mean-token-mean",   # ignored; hard-coded inside
     config:        Optional[ActorConfig] = None,
-    rollout_is_weights: Optional[torch.Tensor] = None,
-    # Optional kwargs --- only consumed by variants that need them
-    trajectory_rewards: Optional[torch.Tensor] = None,   # (B,)
-    group_ids:          Optional[torch.Tensor] = None,   # (B,)
+    rollout_is_weights: torch.Tensor | None = None,   # ignored (Q9)
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     ...
 \end{lstlisting}
 
-For the single-domain ablation round (per Q13), neither \texttt{trajectory\_rewards}
-nor \texttt{group\_ids} is needed --- Obj 1, Obj 3, Obj 4 all live at the
-trajectory level. The kwargs are in the signature for forward compatibility
-with a future multi-domain Obj 2.
+\textbf{No extra kwargs.} Since Obj 2 reduces to Obj 3 at $\lambda=0$ under
+single-domain + GRPO (Q13), we do not need \texttt{trajectory\_rewards}
+or \texttt{group\_ids} on the signature, nor the matching plumbing in
+\texttt{dp\_actor.py} / \texttt{megatron\_actor.py}. Zero changes to the
+actor workers.
 
-\subsection{Upstream plumbing (if/when needed)}
+\subsection{Future multi-domain hook (reference only)}
 
-Stash's pattern for dp\_actor.py (verbatim, with variable renames):
-
-\begin{lstlisting}[caption={dp\_actor.py hook --- from stash@\{0\}}]
-# When BSPO needs group structure (future multi-domain):
-if loss_mode == "bspo" and config.get("bspo_need_groups", False):
-    tlr  = model_inputs.get("token_level_rewards", None)
-    uids = model_inputs.get("uid", None)
-    assert tlr is not None and uids is not None
-    trajectory_rewards = (tlr * response_mask).sum(dim=-1)     # (B,)
-    group_ids = as_torch_index(uids, device=log_prob.device)   # (B,)
-    extra_kwargs["trajectory_rewards"] = trajectory_rewards
-    extra_kwargs["group_ids"]          = group_ids
-
-pg_loss, pg_metrics = policy_loss_fn(
-    old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
-    response_mask=response_mask, loss_agg_mode=loss_agg_mode,
-    config=self.config, rollout_is_weights=rollout_is_weights,
-    **extra_kwargs,
-)
-\end{lstlisting}
-
-\texttt{megatron\_actor.py} needs a mirror hook (the stash also has a
-fallback that hashes the prompt tokens when \texttt{uid} is absent, since
-micro-batching may drop non-tensor fields).
-
-\textbf{For the single-domain first round: the above hooks are not needed.}
-BSPO's Obj 1/3/4 read only \texttt{old\_log\_prob}, \texttt{log\_prob},
-\texttt{advantages}, \texttt{response\_mask}, \texttt{config}. Zero
-changes to actor.py.
+If multi-domain is reintroduced later, the stash pattern at
+\texttt{verl}@\texttt{stash@\{0\}} is the template: add the two kwargs to
+the signature, and add a small hook in \texttt{dp\_actor.py} that extracts
+\texttt{token\_level\_rewards} + \texttt{uid} from \texttt{model\_inputs}
+and passes them via \texttt{**extra\_kwargs}. \texttt{megatron\_actor.py}
+needs a mirror hook with a prompt-hash fallback for the case where
+micro-batching drops the \texttt{non\_tensor\_batch} fields. None of this
+is shipped now.
 
 \section{Loss-aggregation math (Q7)}
 
@@ -488,50 +424,79 @@ For verl's \texttt{agg\_loss(per\_token\_obj, mask, mode)}:
 will hard-code \texttt{loss\_agg\_mode = "seq-mean-token-mean"} the same way
 FACPO does.
 
-\section{Hyperparameter list (proposed, updated per user answers)}
+\section{Hyperparameter list (as shipped)}
 
 \begin{tabular}{l|l|l}
-\textbf{Name} & \textbf{Default} & \textbf{Appears in} \\
+\textbf{Name} & \textbf{Default (yaml)} & \textbf{Appears in} \\
 \hline
-\texttt{bspo\_variant}    & \texttt{simplest} / \texttt{w\_penalty} / \texttt{w\_penalty\_only} & selects Obj 1 / 3 / 4. Obj 2 dropped (Q13 reduction). \\
-\texttt{bspo\_delta}      & 0.2 & single scalar clip threshold $\delta_\tau$ (per Q3: one constant, no group/domain split) \\
-\texttt{bspo\_lambda\_tj} & swept \{0, 0.001, 0.005\} (Q4) & Obj 3, 4 --- soft penalty coeff \\
+\texttt{bspo\_variant}    & \texttt{simplest} & enum \{\texttt{simplest}, \texttt{w\_penalty}, \texttt{w\_penalty\_only}\}; selects Obj 1 / 3 / 4 \\
+\texttt{bspo\_delta}      & $3 \times 10^{-4}$ & scalar clip threshold at GSPO scale (not GRPO's $\sim 0.2$) \\
+\texttt{bspo\_lambda\_tj} & $1 \times 10^{-3}$ & soft penalty coeff; used by Obj 3 + Obj 4 only \\
 \end{tabular}
 
-\medskip
-\noindent
-$s^\pm$ form: \textbf{arithmetic} (Q1), always. No sweep axis.
+Three fields live both in \texttt{verl/trainer/config/actor/actor.yaml}
+(YAML defaults, per plan0.md's "yaml > bash" preference) and as typed
+fields on \texttt{ActorConfig} in \texttt{verl/workers/config/actor.py}.
+Selected at submit time via
+\texttt{actor\_rollout\_ref.actor.bspo\_variant=...} Hydra overrides in
+\texttt{bisimpo/submit\_bspo.sh}.
 
-\noindent
-\texttt{loss\_agg\_mode}: hard-coded to \texttt{seq-mean-token-mean} (Q7 math verdict).
-
-\noindent
-\texttt{sign(s)} treated as detached constant (Q8).
-
-\noindent
-\texttt{rollout\_is\_weights}: ignored in BSPO (Q9).
-
-\section{Ablation plan (per Q10 --- differentiate objectives first)}
-
-\textbf{Phase 1 --- identify winning objective (smallest differentiating set).}
-
-Three runs, default hparams:
+Fixed choices inside the loss function (not knobs):
 \begin{itemize}
-\item \texttt{bspo\_variant=simplest}, $\delta=0.2$ (Obj 1)
-\item \texttt{bspo\_variant=w\_penalty}, $\delta=0.2$, $\lambda=0.001$ (Obj 3)
-\item \texttt{bspo\_variant=w\_penalty\_only}, $\delta=0.2$, $\lambda=0.001$ (Obj 4)
+\item $s^\pm$ form: arithmetic \texttt{max(ratio $-$ 1, 0)} / \texttt{max(1 $-$ ratio, 0)} (Q1).
+\item \texttt{loss\_agg\_mode}: hard-coded to \texttt{seq-mean-token-mean} (Q7 math verdict).
+\item \texttt{sign(s\_tau).detach()} on the Wasserstein sign (Q8).
+\item \texttt{rollout\_is\_weights} accepted but never read (Q9).
 \end{itemize}
 
-(Obj 2 dropped per Q13 reduction.)
+Why $3 \times 10^{-4}$ for \texttt{bspo\_delta}: GSPO paper uses
+$\epsilon \approx 3 \times 10^{-4}$ for a log-ratio clip. BSPO's $s^\pm$
+uses arithmetic $(r - 1)$, linearly equivalent to $\log r$ near $r = 1$,
+so the GSPO magnitude is a reasonable anchor. Phase 2 will sweep around
+this value.
+
+\section{Ablation plan (as executed)}
+
+\textbf{Phase 1 --- identify winning objective.} Three runs at default
+hparams:
+\begin{itemize}
+\item \texttt{cbsp101}: \texttt{bspo\_variant=simplest}, $\delta=3 \times 10^{-4}$ (Obj 1)
+\item \texttt{cbsp103}: \texttt{bspo\_variant=w\_penalty}, $\delta=3 \times 10^{-4}$, $\lambda=10^{-3}$ (Obj 3)
+\item \texttt{cbsp104}: \texttt{bspo\_variant=w\_penalty\_only}, $\delta=3 \times 10^{-4}$, $\lambda=10^{-3}$ (Obj 4)
+\end{itemize}
+
+120 training steps each, \texttt{test\_freq=10}, \texttt{val\_max\_samples=128},
+C11 compute profile (4 nodes, no offload, \texttt{gmu=0.4}).
+Wall clock: $\approx 18$ h per run, three run concurrently on 12 of 31
+compute nodes.
+
+(Obj 2 not run; covered by $\lambda=0$ anchor in Phase 2 of Obj 3.)
 
 \textbf{Phase 2 --- sweep hparams of the Phase 1 winner.}
 
 \begin{itemize}
-\item If winner is Obj 1: sweep $\delta \in \{0.1, 0.2, 0.4\}$. 3 runs.
-\item If winner is Obj 3 / Obj 4: sweep $(\delta, \lambda) \in \{0.1, 0.2, 0.4\} \times \{0, 0.001, 0.005\}$. 9 runs (Q4).
-  The $\lambda = 0$ anchor of Obj 3 exactly reproduces the dropped Obj 2
-  (Q13 reduction), so it serves both as an ablation point and as
-  coverage for the Strict Wasserstein variant.
+\item If winner is Obj 1: sweep $\delta \in \{1 \times 10^{-4},\, 3 \times 10^{-4},\, 1 \times 10^{-3},\, 3 \times 10^{-3}\}$. 4 additional runs (default already covered).
+\item If winner is Obj 3 / Obj 4: sweep
+  $(\delta, \lambda) \in \{10^{-4}, 3 \times 10^{-4}, 10^{-3}\} \times \{0,\, 10^{-3},\, 5 \times 10^{-3}\}$.
+  9 runs total. The $\lambda = 0$ anchor exactly reproduces the dropped
+  Objective 2.
 \end{itemize}
+
+\section{Shipped files --- traceability}
+
+\begin{tabular}{l|l}
+\textbf{File} & \textbf{Change} \\
+\hline
+\texttt{verl/trainer/ppo/core\_algos.py} & $+$167 lines: \texttt{compute\_policy\_loss\_bspo} + metrics + registration \\
+\texttt{verl/trainer/config/actor/actor.yaml} & $+$10 lines: yaml defaults for 3 BSPO fields \\
+\texttt{verl/workers/config/actor.py} & $+$4 lines: dataclass fields \\
+\texttt{verl/my\_scripts/k8s/config/combo\_40Bra.yaml} & $+$32 lines: \texttt{cdbgbspo}, \texttt{cbsp101/103/104} \\
+\texttt{bisimpo/submit\_bspo.sh} & new file: combo $\to$ Hydra overrides + delegates to production \texttt{submit.sh} \\
+\texttt{bisimpo/launch\_phase1.sh} & new file: submits \texttt{cbsp101/103/104} as a batch \\
+\texttt{iter\_kuberay\_32nodes\_verl\_training/submit/submit.sh} & relaxed combo-id regex (1 line) \\
+\end{tabular}
+
+Not touched, deliberately: \texttt{dp\_actor.py}, \texttt{megatron\_actor.py}
+(see \S8 for why).
 
 \end{document}
