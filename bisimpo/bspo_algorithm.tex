@@ -1,0 +1,179 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+
+\title{BSPO --- Formal Algorithm Specification}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+% =============================================================================
+\section{Single-domain BSPO}
+
+\paragraph{Inputs.}
+Batch of $B$ trajectories; each trajectory $\tau$ has length $|\tau|$, tokens
+indexed by $t\in\{1,\ldots,|\tau|\}$, token-level policy ratio
+$r_t = \pi_\theta(a_t\mid s_t)/\pi_{\theta_{\text{old}}}(a_t\mid s_t)$, and
+per-trajectory reward $R_\tau$. Group index (prompt id) partitions
+trajectories; denote the group containing $\tau$ by $g(\tau)$.
+
+\paragraph{Statistics.}
+\begin{align*}
+s_\tau^{+} &= \frac{1}{|\tau|}\sum_{t=1}^{|\tau|}\max(r_t-1,\,0),
+& s_\tau^{-} &= \frac{1}{|\tau|}\sum_{t=1}^{|\tau|}\max(1-r_t,\,0),
+& s_\tau &= s_\tau^{+} - s_\tau^{-}.
+\end{align*}
+
+\paragraph{Advantage (GRPO).}
+\[
+\hat A_\tau = \frac{R_\tau - \bar R_{g(\tau)}}{\sigma_{g(\tau)} + \varepsilon},
+\quad\text{where }
+\bar R_g = \tfrac{1}{|g|}\sum_{\tau\in g}R_\tau,\quad
+\sigma_g^{2} = \tfrac{1}{|g|}\sum_{\tau\in g}(R_\tau - \bar R_g)^{2}.
+\]
+
+\paragraph{Clipping operators.}
+\begin{align*}
+\Delta_\tau^{(\mathrm{reg})}   &= \clip\!\bigl(s_\tau^{+},\,\delta\bigr) - \clip\!\bigl(s_\tau^{-},\,\delta\bigr), \\
+\Delta_\tau^{(\mathrm{W})}     &= \sign(s_\tau)\cdot\clip\!\bigl(\min(s_\tau^{+},s_\tau^{-}),\,\delta\bigr), \\
+\mathrm{pen}_\tau &= \max\!\Bigl(0,\,\tfrac{\min(s_\tau^{+},s_\tau^{-})}{\delta} - 1\Bigr).
+\end{align*}
+\emph{Torch note.} $\sign(s_\tau)$ is implemented as
+\verb|torch.sign(s_tau).detach()|; the direction is a discrete selector
+that carries no gradient, and the magnitude
+$\clip(\min(s_\tau^+,s_\tau^-),\delta)$ carries all policy-parameter
+gradient via $\verb|torch.minimum|\to s^\pm\to$ ratio $\to\log\pi_\theta$.
+
+\paragraph{Per-trajectory objective (choose one variant).}
+\begin{align*}
+&\text{V1 (simplest):}       &\ell_\tau &= \Delta_\tau^{(\mathrm{reg})}\,\hat A_\tau, \\
+&\text{V4 (w\_penalty):}      &\ell_\tau &= \Delta_\tau^{(\mathrm{W})}\,\hat A_\tau \;-\; \lambda\cdot\mathrm{pen}_\tau, \\
+&\text{V5 (w\_penalty\_only):}&\ell_\tau &= s_\tau\,\hat A_\tau \;-\; \lambda\cdot\mathrm{pen}_\tau.
+\end{align*}
+
+\paragraph{Aggregated loss.}
+\[
+\hat J \;=\; \frac{1}{B}\sum_{i=1}^{B}\ell_{\tau_i},
+\qquad
+\mathcal L \;=\; -\hat J.
+\]
+
+\paragraph{Hyperparameters.}
+$\delta>0,\;\lambda\geq 0$.
+
+% =============================================================================
+\section{Multi-domain BSPO}
+
+\paragraph{Inputs.}
+Batch of $B$ trajectories drawn from a hierarchy $\tau \in g \in dom$.
+Tokens as above; $|\tau|$ is token count in $\tau$, $|g|$ is trajectory
+count in $g$, $|dom|$ is group count in $dom$. Denote $g(\tau)$, $dom(\tau)$
+the group and domain of $\tau$, and $dom(g)$ the domain of $g$. Let
+$T_g = \sum_{\tau\in g}|\tau|$, $T_{dom}=\sum_{g\in dom}T_g$.
+
+\paragraph{Ratio statistics at each hierarchy level.}
+\begin{align*}
+s_\tau^{\pm}   &= \tfrac{1}{|\tau|}\sum_{t=1}^{|\tau|}\max\!\bigl(\pm(r_t-1),\,0\bigr),
+  & s_\tau &= s_\tau^{+}-s_\tau^{-}, \\
+s_g^{\pm}      &= \tfrac{1}{|g|}\sum_{\tau\in g}\max(\pm s_\tau,\,0),
+  & s_g &= s_g^{+}-s_g^{-}, \\
+s_{dom}^{\pm}  &= \tfrac{1}{|dom|}\sum_{g\in dom}\max(\pm s_g,\,0),
+  & s_{dom} &= s_{dom}^{+}-s_{dom}^{-}.
+\end{align*}
+
+\paragraph{Bisimulation-distance estimates.}
+\[
+\hat d(z) = \mathbb E_{\tau\sim P(\cdot\mid z)}\bigl[\,\lvert R(\tau)-\bar R_z\rvert\,\bigr],\qquad
+R_{\max\text{res}}(dom) = \max_{\tau\in dom}\lvert R(\tau)-\bar R_{dom}\rvert,
+\]
+\[
+\hat d_{\operatorname{Grp}}(g) = \frac{T_g^{2}}{T_{dom}^{2}}\,\hat d(g).
+\]
+
+\paragraph{Advantages.}
+\[
+\hat A_\tau =
+\begin{cases}
+\dfrac{R_\tau - \bar R_{g(\tau)}}{\sigma_{g(\tau)}+\varepsilon}
+  & \text{(GRPO)} \\[6pt]
+\dfrac{1}{\min\!\bigl(\hat d(dom(\tau)),\,1/|g(\tau)|\bigr)}\cdot\dfrac{R_\tau - \bar R_{g(\tau)}}{R_{\max\text{res}}(dom(\tau))}
+  & \text{(Wasserstein)}
+\end{cases}
+\]
+\[
+\hat A_g   = \tfrac{1}{T_g}\sum_{\tau\in g}\hat A_\tau\cdot|\tau|,\qquad
+\hat A_{dom} = \tfrac{T_g}{T_{dom}}\sum_{g\in dom}\hat A_g.
+\]
+
+\paragraph{Effective thresholds.}
+Given flat hyperparameters $\delta_{\text{D}},\delta_{\operatorname{Grp}},\delta_{\operatorname{Tj}}>0$,
+\begin{align*}
+\delta_{dom} &= \frac{\hat d(dom)}{R_{\max\text{res}}(dom)}\,\delta_{\text{D}}, \\
+\delta_g     &= \delta_{dom}\cdot
+                 \frac{\hat d_{\operatorname{Grp}}(g)}{\sum_{g'\in dom}\hat d_{\operatorname{Grp}}(g')^{2}}\,\delta_{\operatorname{Grp}}, \\
+\delta_\tau  &= \delta_g\cdot\frac{\delta_{\operatorname{Tj}}}{T_g\,\delta_{\operatorname{Grp}}}
+              \;=\; \delta_{dom}\cdot
+                 \frac{\hat d_{\operatorname{Grp}}(g)}{\sum_{g'\in dom}\hat d_{\operatorname{Grp}}(g')^{2}}\,\frac{\delta_{\operatorname{Tj}}}{T_g}.
+\end{align*}
+
+\paragraph{Clipping operators at each level ($z\in\{\tau,g,dom\}$).}
+\begin{align*}
+\Delta_z^{(\mathrm{reg})}   &= \clip\!\bigl(s_z^{+},\,\delta_z\bigr) - \clip\!\bigl(s_z^{-},\,\delta_z\bigr), \\
+\Delta_z^{(\mathrm{W})}     &= \sign(s_z)\cdot\clip\!\bigl(\min(s_z^{+},s_z^{-}),\,\delta_z\bigr), \\
+\mathrm{pen}_z &= \max\!\Bigl(0,\,\tfrac{\min(s_z^{+},s_z^{-})}{\delta_z} - 1\Bigr).
+\end{align*}
+\emph{Torch note.} $\sign(s_z)$ is implemented as
+\verb|torch.sign(s_z).detach()|; direction is a discrete selector, all
+policy-parameter gradient flows through
+$\clip(\min(s_z^+,s_z^-),\delta_z)$.
+
+\paragraph{Per-trajectory objective (choose one variant).}
+\begin{align*}
+&\text{V1 (simplest):}
+  &\ell_\tau &= \Delta_\tau^{(\mathrm{reg})}\,\hat A_\tau, \\
+&\text{V2 (hierarchy, reg):}
+  &\ell_\tau &= \bigl(\Delta_\tau^{(\mathrm{reg})} - \Delta_{g(\tau)}^{(\mathrm{reg})}\bigr)\,\hat A_\tau, \\
+&\text{V3 (strict Wasserstein):}
+  &\ell_\tau &= \Delta_{dom(\tau)}^{(\mathrm{W})}\,\hat A_{dom(\tau)}
+               + \Delta_{g(\tau)}^{(\mathrm{W})}\,\hat A_{g(\tau)}
+               + \Delta_\tau^{(\mathrm{W})}\,\hat A_\tau, \\
+&\text{V4 (W penalty):}
+  &\ell_\tau &= \Delta_\tau^{(\mathrm{W})}\,\hat A_\tau
+               - \lambda_{\operatorname{Tj}}\,\mathrm{pen}_\tau
+               - \lambda_{\operatorname{Grp}}\,\mathrm{pen}_{g(\tau)}
+               - \lambda_{\text{D}}\,\mathrm{pen}_{dom(\tau)}, \\
+&\text{V5 (W penalty only):}
+  &\ell_\tau &= s_\tau\,\hat A_\tau
+               - \lambda_{\operatorname{Tj}}\,\mathrm{pen}_\tau
+               - \lambda_{\operatorname{Grp}}\,\mathrm{pen}_{g(\tau)}
+               - \lambda_{\text{D}}\,\mathrm{pen}_{dom(\tau)}.
+\end{align*}
+
+\paragraph{Optional token-level refinement (V5 and unclipped components of V3, V4).}
+Replace $s_\tau\,\hat A_\tau$ by
+\[
+\Bigl(\,s_\tau + \tfrac{1}{|\tau|}\sum_{t=1}^{|\tau|}\clip\!\bigl(r_t - 1 - s_\tau,\,\delta_{\operatorname{tok}}\bigr)\Bigr)\hat A_\tau,
+\]
+with $\delta_{\operatorname{tok}}$ inherited from the GRPO token threshold.
+
+\paragraph{Aggregated loss.}
+\[
+\hat J \;=\; \frac{1}{B}\sum_{i=1}^{B}\ell_{\tau_i},\qquad
+\mathcal L \;=\; -\hat J.
+\]
+
+\paragraph{Hyperparameters.}
+Thresholds $\delta_{\text{D}},\delta_{\operatorname{Grp}},\delta_{\operatorname{Tj}},\delta_{\operatorname{tok}}>0$;
+penalty weights $\lambda_{\text{D}},\lambda_{\operatorname{Grp}},\lambda_{\operatorname{Tj}}\geq 0$;
+numerical $\varepsilon>0$.
+
+\end{document}

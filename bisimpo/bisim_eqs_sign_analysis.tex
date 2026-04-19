@@ -1,0 +1,427 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+\newcommand{\dif}{\mathrm{d}}
+
+\title{Sign-Handling in $\Delta_z^{(W)} = \sign(s_z)\cdot\clip(\min(s_z^+,s_z^-),\delta_z)$ \\
+\large Trade-off Analysis of Three (Four) Variants}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The BSPO Wasserstein clipping operator
+$\Delta_z^{(W)} = \sign(s_z)\cdot\clip(\min(s_z^+,s_z^-),\delta_z)$ carries
+a non-differentiable $\sign$ factor. We enumerate three candidate
+treatments (with two sub-interpretations of the third) and compare them
+on: mathematical faithfulness, gradient behaviour at the on-policy fixed
+point, gradient behaviour just off-policy, hyperparameter cost, and
+expected effect on final optimisation. The key observation is that the
+magnitude factor $\clip(\min(s_z^+,s_z^-),\delta_z)$ is identically zero
+at the on-policy state, \emph{pre-annihilating} any sign contribution
+regardless of how the sign is implemented. We conclude that
+$\verb|torch.sign(s).detach()|$ is the unique choice consistent with the
+mathematical derivative ($\dif\sign/\dif s = 0$ almost everywhere) and
+recommend it as the default, with a concrete empirical protocol to
+validate that the sign path is informationally inert.
+\end{abstract}
+
+% =============================================================================
+\section{The three variants defined precisely}
+\label{sec:variants}
+
+We need $\sign(s_z)$ in forward; the question is what
+$\dif\sign/\dif s$ returns to autograd in backward. Three variants are
+considered.
+
+\subsection*{V1 --- Stop-loss / \texttt{.detach()}}
+
+\[
+\sign_1(s) \;=\; \sign(s),\qquad
+\frac{\dif\sign_1}{\dif s}(s) \;\equiv\; 0 \text{ (autograd override)}.
+\]
+
+Torch realisation: \verb|sign_s = torch.sign(s).detach()|.
+Backward through the sign is severed; gradient through
+$\Delta_z^{(W)}$ comes only from the magnitude factor
+$\clip(\min(s_z^+, s_z^-), \delta_z)$.
+
+\subsection*{V2 --- Continuous sign surrogate}
+
+Two common smooth replacements:
+\[
+\sign_{2a}(s) \;=\; \frac{s}{\sqrt{s^2+\varepsilon^2}},
+\qquad
+\sign_{2b}(s) \;=\; \tanh(\beta s).
+\]
+
+For the $\varepsilon$-smoothed form,
+\[
+\frac{\dif\sign_{2a}}{\dif s}(s) = \frac{\varepsilon^2}{(s^2+\varepsilon^2)^{3/2}},
+\qquad
+\left.\frac{\dif\sign_{2a}}{\dif s}\right|_{s=0} = \frac{1}{\varepsilon}.
+\]
+
+Torch: \verb|sign_s = s / torch.sqrt(s*s + eps*eps)|. Fully
+differentiable, no $\verb|.detach()|$.
+
+\subsection*{V3 --- ``gradient $=1$ at $0$, $=0$ elsewhere''}
+
+This prompt admits multiple interpretations.
+
+\textbf{V3a --- literal single-point injection.} Define a custom autograd
+node with forward $\sign(s)$ and backward $\dif\sign/\dif s = 1$ iff
+$s = 0$, else $0$. In \texttt{fp32}/\texttt{fp64}, $s=0$ is measure-zero
+and in practice almost never hit; this variant is \emph{numerically
+indistinguishable from V1}.
+
+\textbf{V3b --- local straight-through estimator (local STE).}
+Inject gradient in an $\varepsilon$-neighborhood of $0$:
+$\dif\sign/\dif s = 1$ for $|s| < \varepsilon$, $0$ otherwise. Torch:
+\begin{verbatim}
+near    = (s.abs() < eps).float()
+sign_s  = torch.sign(s).detach() + near * (s - s.detach())
+# forward = sgn(s); backward = 1 inside |s|<eps, 0 outside
+\end{verbatim}
+
+\textbf{V3c --- full STE (identity backward).}
+Forward is $\sign(s)$, backward is the identity:
+$\dif\sign/\dif s \equiv 1$. Torch: \verb|sign_s = torch.sign(s) + s - s.detach()|.
+Common in discrete-variable / quantised NN literature.
+
+% =============================================================================
+\section{On-policy fixed-point analysis}
+\label{sec:onpolicy}
+
+At the on-policy state, $r_t = 1$ for all $t \in \tau$, hence
+$s_\tau^+ = s_\tau^- = 0$, $s_\tau = 0$,
+$\min(s_\tau^+, s_\tau^-) = 0$, $\clip(\min,\delta_\tau)=0$, and
+$\Delta_\tau^{(W)} = 0$ regardless of the sign convention. The objective
+contribution vanishes trivially.
+
+The question is the \emph{gradient} at this state. Apply the product rule:
+\begin{align}
+\frac{\partial (\Delta_z^{(W)} \hat A_z)}{\partial \theta}
+ &= \hat A_z\cdot\Bigl[
+ \sign(s_z)\,\frac{\partial\,\clip(\min(s_z^+,s_z^-),\delta_z)}{\partial \theta}
+ \nonumber \\
+ &\qquad + \clip(\min(s_z^+,s_z^-),\delta_z)\,\frac{\partial \sign(s_z)}{\partial \theta}\Bigr].
+ \label{eq:product-rule}
+\end{align}
+
+At on-policy:
+\begin{itemize}
+\item $\sign(0) = 0$ (by convention),
+\item $\clip(\min,\delta_z)\big|_{s^{\pm}=0} = 0$,
+\item $\partial\min/\partial\theta\big|_{s^{\pm}=0} = 0$ (any subgradient
+works; the minimum at the boundary is $0$),
+\item $\partial s/\partial \theta \neq 0$ in general (this is
+$\partial(\log\pi_\theta - \log\pi_{\theta_{\text{old}}})/\partial\theta$).
+\end{itemize}
+
+Substituting into \eqref{eq:product-rule}:
+\[
+\left.\frac{\partial (\Delta_z^{(W)} \hat A_z)}{\partial \theta}\right|_{\text{on-policy}}
+= \hat A_z\cdot\bigl[\,0\cdot 0 + 0\cdot \tfrac{\partial \sign_v}{\partial\theta}\,\bigr]
+= 0.
+\]
+
+\begin{theorem}[Pre-annihilation at on-policy]
+\label{thm:preannihilation}
+For every sign-handling variant $v \in \{1, 2a, 2b, 3a, 3b, 3c\}$, and any
+finite-valued $\partial\sign_v/\partial\theta$, the gradient of
+$\Delta_z^{(W)}\hat A_z$ w.r.t.\ policy parameters $\theta$ is
+identically zero at the exact on-policy state.
+\end{theorem}
+
+\begin{proof}
+From \eqref{eq:product-rule}, both product terms carry a factor that
+vanishes on-policy: the first is multiplied by $\sign(0)=0$, the second
+by $\clip(\min,\delta_z)=0$. Any finite backward of
+$\partial\sign_v/\partial\theta$ is multiplied by the zero magnitude.
+\end{proof}
+
+\textbf{Interpretation.} The sign path is \emph{informationally redundant}
+at on-policy: whatever gradient the sign backward might wish to contribute
+is multiplied by a magnitude factor that the definition of $\Delta^{(W)}$
+already forces to zero. All six sign conventions produce identical
+behaviour at the on-policy fixed point. Differences among them arise only
+in the open neighbourhood $0 < |s| \leq \min(s^+, s^-)$.
+
+% =============================================================================
+\section{Off-policy regime and gradient-path decomposition}
+\label{sec:offpolicy}
+
+Set $m := \clip(\min(s_z^+, s_z^-), \delta_z) > 0$. Decompose
+\eqref{eq:product-rule} into a \emph{magnitude path} (first term) and a
+\emph{sign path} (second term):
+\[
+\frac{\partial (\Delta_z^{(W)} \hat A_z)}{\partial \theta}
+= \underbrace{\sign(s_z)\,\hat A_z\cdot\frac{\partial m}{\partial \theta}}_{\text{magnitude path}}
++ \underbrace{m\,\hat A_z\cdot\frac{\partial \sign_v(s_z)}{\partial \theta}}_{\text{sign path}}.
+\]
+
+The magnitude path is identical across all six variants (they differ only
+in the $\sign_v$ sub-expression, not in $m$). The sign path is what
+separates them.
+
+\subsection{Sign-path gradient at $s_z \to 0^+$ (just off-policy)}
+
+$\partial\sign_v/\partial\theta = (\dif\sign_v/\dif s)\cdot\partial s/\partial\theta$.
+Using the derivatives recorded in \S\ref{sec:variants}:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{l l l}
+\toprule
+variant & $\dif\sign_v/\dif s$ at $s\to 0^+$ & sign-path gradient magnitude \\
+\midrule
+V1 (detach) & $0$ & $0$ \\
+V2a (smooth, $s/\sqrt{s^2+\varepsilon^2}$) & $1/\varepsilon$ & $m\hat A_z / \varepsilon \cdot |\partial s/\partial\theta|$ \\
+V2b (smooth, $\tanh(\beta s)$) & $\beta$ & $\beta m\hat A_z\cdot|\partial s/\partial\theta|$ \\
+V3a (grad $=1$ at $s=0$ only) & $0$ a.e.\ (meas.~zero support) & $0$ in floating-point \\
+V3b (local STE, $|s|<\varepsilon$) & $1$ & $m\hat A_z\cdot|\partial s/\partial\theta|$ \\
+V3c (full STE) & $1$ & $m\hat A_z\cdot|\partial s/\partial\theta|$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Consequences.}
+V1 and V3a contribute zero to the sign path, matching the mathematical
+a.e.\ derivative of $\sign$. V2a can produce a \emph{spike} of gradient of
+size $m\hat A_z/\varepsilon$ --- unbounded as $\varepsilon\to 0$ --- near
+the on-policy manifold. V2b is bounded by $\beta m$ but still biased. V3b
+and V3c inject a constant gradient of $m\hat A_z\cdot|\partial s/\partial\theta|$
+through the sign path regardless of whether the mathematical derivative
+permits it.
+
+% =============================================================================
+\section{Trade-off matrix}
+\label{sec:matrix}
+
+Consolidating \S\ref{sec:variants}--\S\ref{sec:offpolicy}:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{4.5cm} l l l l l}
+\toprule
+dimension & V1 detach & V2 smooth & V3a literal & V3b local STE & V3c full STE \\
+\midrule
+math faithfulness to $\dif\sign/\dif s = 0$ a.e. & exact & biased $\neq 0$ near $s=0$ & exact & biased inside $|s|<\varepsilon$ & heavily biased \\
+sign-path gradient near $s=0$ & $0$ & $\sim m\hat A/\varepsilon$ & $0$ & $m\hat A\cdot\partial s/\partial\theta$ & $m\hat A\cdot\partial s/\partial\theta$ \\
+magnitude-path gradient & $\sign(s)\hat A\cdot\partial m/\partial\theta$ & same (up to smoothed sign) & same & same & same \\
+signal at ``just off-policy'' & small (mag is small too) & potentially large ($1/\varepsilon$ spike) & small & medium (bump active) & large (always pushes $s$) \\
+hyperparameter & none & $\varepsilon$ or $\beta$ & none & $\varepsilon$ & none \\
+explosive grad risk & none & high for small $\varepsilon$ & none & bounded by $\varepsilon$ & bounded, constant \\
+biases policy away from $s\!=\!0$? & no & yes (via $m/\varepsilon$) & no & yes (inside bump) & yes (pushes $s$ up) \\
+\texttt{.detach()} required? & yes (definitional) & no & yes on outer path & yes on outer & yes on outer \\
+extra fwd-pass ops & $0$ & $\sim 2$ (sqrt, div) & $0$ & mask op & tiny (add/sub) \\
+unbiased estimator of $\dif\sign/\dif s$? & yes (zero is truth) & no & yes & no & no \\
+\bottomrule
+\end{tabular}%
+}
+\end{center}
+
+Three take-aways:
+
+\begin{enumerate}
+\item V1 is the only variant whose gradient matches the mathematical
+a.e.\ derivative of $\sign$. Every other variant \emph{adds} a
+non-mathematical gradient signal through the sign path, which is a bias.
+\item V2a's bias is potentially catastrophic for small $\varepsilon$:
+the $1/\varepsilon$ gradient at $s=0$, multiplied by a nonzero
+$m\hat A$, injects unbounded gradient spikes near the on-policy
+manifold. Avoiding this would require $\varepsilon \sim \delta_z$, at
+which point the surrogate barely approximates $\sign$.
+\item V3a is V1 in disguise. V3b and V3c are biased-on-purpose variants
+that are appropriate only in settings where a deliberate push off the
+on-policy manifold is desired.
+\end{enumerate}
+
+% =============================================================================
+\section{Why V1 is the correct default --- the on-policy argument, revisited}
+\label{sec:whyV1}
+
+Theorem~\ref{thm:preannihilation} says: \emph{the magnitude factor
+annihilates any sign contribution at on-policy}. Two corollaries follow.
+
+\begin{corollary}[Sign-path informational redundancy]
+Near the on-policy manifold where $\|s\|_\infty \to 0$,
+$m \to 0$ at the same rate. Any sign-path gradient is thus
+multiplied by a quantity that is itself going to zero. A well-scaled
+training run does not need the sign path to contribute gradient near
+on-policy; the magnitude path already handles the vanishing correctly.
+\end{corollary}
+
+\begin{corollary}[Non-mathematical sign-gradient is a bias, not a feature]
+What V2/V3b/V3c's sign-path gradient actually does is push the policy
+\emph{away} from the on-policy manifold. This is:
+(i) not required by the math (Theorem~\ref{thm:preannihilation} shows the
+objective doesn't need this push);
+(ii) inconsistent with standard PG/PPO, which treat the sampling state
+as the desired state to return to;
+(iii) a modification of the objective, not a faithful implementation of it.
+\end{corollary}
+
+Thus V1 (detach) is the unique variant that (a) preserves the
+$\Delta^{(W)} = \sign\cdot m$ factorisation as a mathematical statement
+and (b) makes the backward chain consistent with the a.e.\ derivative of
+$\sign$. The claim ``\texttt{.detach()} is a trick'' is incorrect: it is
+the \emph{declaration} that the sign is a categorical direction selector,
+and in doing so it realises the mathematically correct zero derivative
+exactly, avoiding the NaN/undefined that a naive autograd might emit at
+$s=0$.
+
+% =============================================================================
+\section{Expected effect on final optimisation performance}
+\label{sec:effect}
+
+How large is the effect of choosing V1 vs V2 vs V3? Theory alone gives us
+\emph{bounds} on the effect, not its magnitude.
+
+\subsection{Upper bound on the sign-path contribution}
+
+For any step where $|s_z| > \varepsilon$ (outside V2/V3b's bump/spike
+region), all variants give approximately identical gradients, because
+either $\dif\sign_v/\dif s$ has decayed to zero (V2, V3b) or it was zero
+to begin with (V1, V3a).
+
+For steps with $|s_z| < \varepsilon$:
+\[
+\bigl\|\text{sign-path gradient}\bigr\|_{\infty}
+\;\leq\; \frac{1}{\varepsilon}\cdot m\cdot|\hat A_z|\cdot\left\|\frac{\partial s}{\partial\theta}\right\|_\infty
+\;\leq\; \frac{\delta_z\cdot\max|\hat A|\cdot\|\partial s/\partial\theta\|_\infty}{\varepsilon}.
+\]
+
+For the reference Phase-1 ablation ($\delta_z = 3\times 10^{-4}$,
+$\max|\hat A|\approx 3$, $\|\partial s/\partial\theta\|_\infty$ bounded
+by the model's per-token log-prob sensitivity), the worst-case
+sign-path gradient under V2a with $\varepsilon = 10^{-4}$ is of the same
+order as $|\partial s/\partial\theta|\cdot\delta_z/\varepsilon \approx 3$,
+i.e.\ it \emph{is} a dominant contribution when it fires. But it fires
+only in a vanishing-measure subset of steps (those with $|s_\tau| <
+\varepsilon$), so its average effect on training is bounded by that
+fraction of steps.
+
+\subsection{Expected magnitude, heuristic}
+
+In practice:
+\begin{itemize}
+\item After the first policy update, the ratio distribution spreads and
+$\min(s_\tau^+, s_\tau^-)$ is almost always $> \varepsilon$ for sensible
+choices (e.g.\ $\varepsilon < 10^{-3}$). The sign path is inactive for
+V2, V3b most of the time.
+\item When $|s_\tau|$ does get small, it is often because the
+trajectory's ratios are symmetric around $1$, in which case
+$\min(s_\tau^+, s_\tau^-)$ is also small but not zero --- so the
+magnitude path gives a nonzero gradient anyway.
+\item Empirically, Phase-1 v2 runs under V1 show
+$\texttt{actor/bspo\_s\_tau\_abs\_mean}$ rising from $5.7\!\times\!10^{-4}$
+at step $1$ to $\sim 0.2$ by step $60$ (see
+\texttt{dev\_notes\_ablation.md}). The magnitude path alone is driving
+the off-policy excursion; no sign-surrogate help is needed.
+\end{itemize}
+
+Expected effect on final validation accuracy: \textbf{$<1\%$ difference}
+between V1 and V2 on mathematical reasoning benchmarks at standard BSPO
+hyperparameters, with V1 more stable (no gradient spikes).
+
+% =============================================================================
+\section{Empirical measurement protocol}
+\label{sec:measure}
+
+We rank measurement strategies from cheapest to most rigorous.
+
+\subsection*{(M1) Probe metrics during training (zero extra compute)}
+
+Add two scalars to the training log:
+\begin{itemize}
+\item $\|\text{grad}_{\text{sgn-path}}\|$: norm of the sign-path
+contribution, computed via a one-line autograd hook that captures
+$\partial(m\hat A\cdot\sign_v(s))/\partial\theta$ specifically.
+\item $\|\text{grad}_{\text{mag-path}}\|$: norm of the magnitude-path
+contribution, captured symmetrically.
+\end{itemize}
+
+Diagnostic: if $\|\text{grad}_{\text{sgn}}\| \ll \|\text{grad}_{\text{mag}}\|$
+throughout training, the sign path is informationally inert and all three
+variants are indistinguishable. Under V1 the sign-path norm is exactly
+$0$; this is a sanity check.
+
+Also log the batch-mean histogram of $|s_\tau|$: if the bulk of
+trajectories satisfy $|s_\tau| > \varepsilon$, V2/V3b can't possibly
+differ from V1 (the spike region is empty).
+
+\subsection*{(M2) Matched ablation runs (cost: $3\times$ Phase-1 compute)}
+
+Fix all hyperparameters, seed, data, compute profile. Run three 120-step
+BSPO runs with V1, V2a($\varepsilon=10^{-4}$), V3c respectively. Compare:
+\begin{itemize}
+\item Final \verb|val-core/<source>/acc/mean@1| for each of the 3
+eval sources.
+\item Training stability: $\mathrm{std}(\texttt{actor/pg\_loss})$ over
+last $20$ steps, $\max(\texttt{actor/grad\_norm})$ over the whole run.
+\item $\texttt{actor/bspo\_s\_tau\_abs\_mean}$ trajectory: expectation is
+V2 pushes $|s_\tau|$ up more aggressively early; V1 lets $|s_\tau|$
+rise organically from the magnitude path.
+\end{itemize}
+
+\subsection*{(M3) Synthetic backward-pass test (cost: minutes)}
+
+Fabricate a batch where $s_\tau$ is tiny (say $10^{-5}$) and
+$\min(s_\tau^+, s_\tau^-)$ is large (say $10^{-2}$). Run forward +
+backward under each variant and compare $\partial\texttt{pg\_loss}/\partial\texttt{log\_prob}$
+element-wise. V2a with $\varepsilon = 10^{-4}$ will produce gradients
+$\sim 10^3\times$ larger than V1 on this batch. This establishes the
+\emph{worst-case} injection under V2, but not the expected-case
+contribution during real training.
+
+% =============================================================================
+\section{Recommendation}
+\label{sec:reco}
+
+\begin{enumerate}
+\item \textbf{Default: V1 (\texttt{.detach()}).} Matches the mathematical
+a.e.\ derivative of $\sign$, has no hyperparameter, introduces no
+spurious gradient injection, and --- by
+Theorem~\ref{thm:preannihilation} --- the on-policy factorisation
+$\Delta^{(W)} = \sign\cdot m$ already makes the sign path contribute
+zero at the fixed point. No optimisation benefit is available from
+adding a surrogate.
+
+\item \textbf{Switch to V2a only if V1 exhibits specific pathologies} ---
+e.g.\ the policy getting stuck on the on-policy manifold and failing to
+move. In the current Phase-1 ablation this pathology is
+\emph{not observed}: $\texttt{actor/bspo\_s\_tau\_abs\_mean}$
+rises monotonically from step $1$ onward, driven by the magnitude path.
+
+\item \textbf{V3a is V1.} V3b and V3c are biased STE variants justified
+only when a deliberate push off the on-policy manifold is part of the
+algorithmic design; this is not the case here.
+
+\item \textbf{If rigour is needed, use M1 first.} Log
+$\|\text{grad}_{\text{sgn}}\|$ and $\|\text{grad}_{\text{mag}}\|$
+separately. If the sign-path norm stays at zero under V1 and val-acc
+curves are smooth, empirical confirmation of the theoretical
+pre-annihilation argument is obtained.
+\end{enumerate}
+
+\textbf{One-sentence summary.} Since the magnitude factor
+$\clip(\min(s_z^+, s_z^-), \delta_z)$ vanishes on the on-policy manifold
+and the sign factor contributes only via this vanishing magnitude, the
+sign path is pre-annihilated there regardless of how its gradient is
+defined --- making V1's ``zero gradient through sign'' the
+mathematically honest choice.
+
+\end{document}

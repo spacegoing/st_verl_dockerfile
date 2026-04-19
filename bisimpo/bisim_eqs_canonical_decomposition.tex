@@ -1,0 +1,386 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+\newcommand{\smean}{s^{\text{MEAN}}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+
+\title{Canonical Hierarchical Decomposition of the BSPO Ratio Statistics \\
+\large --- A Derivation Independent of GRPO's Zero-Group-Mean Property}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We drop the assumption that GRPO advantages satisfy
+$\sum_{\tau\in g}\hat A_\tau = 0$ and ask: among the candidate
+normalisations A1, A2, A3 of $s_\tau^\pm$, $s_g^\pm$, $s_{dom}^\pm$, which
+one produces the \emph{canonical} hierarchical decomposition that retains
+the recovery/decoupling property when the cross-level subtraction
+$s_g - s_{dom}$ (or $s_\tau - s_g$) is used in contexts outside the
+$\Ehat\cdot\hat A_\tau$ linear form --- e.g.\ penalty terms, or novel
+variants? We show that A3 (mean at every level) is uniquely singled out by
+an ANOVA-style decomposition criterion: it is the only one of the three in
+which the empirical $s_g$ equals the empirical conditional mean of
+$s_\tau$ given $g$, and similarly for $s_{dom}$. A2 fails this uniqueness
+even though it passes the narrower recovery test of
+\texttt{bisim\_eqs\_recovery.tex}. The argument does not use
+$\sum_{\tau\in g}\hat A_\tau=0$ at any point.
+\end{abstract}
+
+% =============================================================================
+\section{Setup}
+
+As in \texttt{bisim\_eqs\_recovery.tex}, denote the three candidate
+normalisations of the one-sided ratio statistics by A1, A2, A3. The
+trajectory-level definition agrees on A2 and A3
+($s_\tau^\pm = |\tau|^{-1}\sum_t\max(\pm(r_t-1),0)$), and differs on A1
+(no division). The group- and domain-level definitions are the point of
+interest:
+\begin{align*}
+\text{A2:}\quad s_g^\pm &= \sum_{\tau\in g}\max(\pm s_\tau,0),
+  & s_{dom}^\pm &= \sum_{g\in dom}\max(\pm s_g,0) \\
+\text{A3:}\quad s_g^\pm &= \tfrac{1}{|g|}\sum_{\tau\in g}\max(\pm s_\tau,0),
+  & s_{dom}^\pm &= \tfrac{1}{|dom|}\sum_{g\in dom}\max(\pm s_g,0).
+\end{align*}
+
+\textbf{New assumption.} We \emph{drop} the GRPO identity
+$\sum_{\tau\in g}\hat A_\tau = 0$. All cancellations in this note come
+purely from the algebraic aggregation structure of the advantage
+($\hat A_g = |g|^{-1}\sum_\tau\hat A_\tau$;
+$\hat A_{dom} = |dom|^{-1}\sum_g\hat A_g$ under balanced batches, or the
+$T_g/T_{dom}$-weighted form of \texttt{bisim\_eqs\_multidomain.tex}~\S7
+in general) and from the normalisation of $s_z^\pm$.
+
+% =============================================================================
+\section{Two contexts in which $s_g - s_{dom}$ may appear}
+
+\subsection*{Context I --- multiplied by a hierarchical advantage}
+
+This is the Variant~2 full form of \texttt{bisim\_eqs\_multidomain.tex}~\S8:
+\[
+\hat J_2^{\text{full}}
+  = \Ehat_\tau\bigl[\Delta_{dom}\hat A_{dom}
+       + (\Delta_g-\Delta_{dom})\hat A_g
+       + (\Delta_\tau-\Delta_g)\hat A_\tau\bigr].
+\]
+At $\delta\to\infty$, $\Delta_z\to s_z$.
+
+\begin{lemma}[Aggregation identities, no GRPO needed]
+\label{lem:agg}
+For any function $s_z$ that is constant on the $z$-block of the hierarchy
+(trajectory, group, or domain), and with $\hat A_g=|g|^{-1}\sum_\tau\hat A_\tau$
+and balanced batches,
+\[
+\Ehat_\tau[s_{g(\tau)}\hat A_\tau]
+  = \Ehat_\tau[s_{g(\tau)}\hat A_{g(\tau)}],
+\qquad
+\Ehat_\tau[s_{dom(\tau)}\hat A_g]
+  = \Ehat_\tau[s_{dom(\tau)}\hat A_{dom(\tau)}].
+\]
+\end{lemma}
+
+\begin{proof}
+$\Ehat_\tau[s_{g(\tau)}\hat A_\tau] = B^{-1}\sum_\tau s_{g(\tau)}\hat A_\tau
+= B^{-1}\sum_g s_g\sum_{\tau\in g}\hat A_\tau = B^{-1}\sum_g s_g\cdot|g|\hat A_g
+= B^{-1}\sum_g\sum_{\tau\in g}s_g\hat A_g = \Ehat_\tau[s_{g(\tau)}\hat A_{g(\tau)}]$.
+Same for the other identity.
+\end{proof}
+
+\begin{proposition}[Context I recovery holds without GRPO]
+\label{prop:ctx1}
+For both A2 and A3, at $\delta\to\infty$,
+\[
+\hat J_2^{\text{full},(\infty)}
+  = \Ehat_\tau[s_\tau\hat A_\tau]
+  = \hat J_1^{(\infty)}.
+\]
+\end{proposition}
+
+\begin{proof}
+Expanding and applying Lemma~\ref{lem:agg} twice:
+\begin{align*}
+\hat J_2^{\text{full},(\infty)}
+  &= \Ehat[s_{dom}\hat A_{dom}]
+   + \Ehat[s_g\hat A_g] - \Ehat[s_{dom}\hat A_g]
+   + \Ehat[s_\tau\hat A_\tau] - \Ehat[s_g\hat A_\tau] \\
+  &= \Ehat[s_{dom}\hat A_{dom}]
+   + \Ehat[s_g\hat A_g] - \Ehat[s_{dom}\hat A_{dom}]
+   + \Ehat[s_\tau\hat A_\tau] - \Ehat[s_g\hat A_g] \\
+  &= \Ehat[s_\tau\hat A_\tau].
+\end{align*}
+No use of $\sum\hat A_\tau|g = 0$.
+\end{proof}
+
+\textbf{Consequence for Context I.} The full-hierarchy form of Variant 2
+recovers Variant 1 under both A2 and A3, purely by aggregation algebra,
+independent of GRPO. So in Context I the recovery property \emph{alone}
+cannot discriminate A2 from A3 (this matches the conclusion of
+\texttt{bisim\_eqs\_recovery.tex}~\S6).
+
+\subsection*{Context II --- the subtraction appears without $\hat A$}
+
+Everywhere else in the BSPO objective collection the higher-level $s_z$
+appears \emph{unmultiplied} by an advantage. The three places in the
+current spec that matter:
+
+\begin{enumerate}
+\item \emph{Variant 4--5 penalty terms}:
+\[
+-\lambda_z \max\!\Bigl(0,\;\tfrac{\min(s_z^+,s_z^-)}{\delta_z}-1\Bigr),
+\qquad z\in\{\tau,g,dom\}.
+\]
+The $\min$-based clipping is compared to $\delta_z$ directly; there is no
+$\hat A$ in sight. The scale of $s_z$ enters through the ratio
+$\min(s_z^+,s_z^-)/\delta_z$.
+
+\item \emph{Variant 2 simplified form}:
+$\Ehat[(\Delta_\tau-\Delta_g)\hat A_\tau]$. At $\delta\to\infty$ this is
+$\Ehat[s_\tau\hat A_\tau] - \Ehat[s_g\hat A_\tau]$. Without GRPO
+zero-mean, $\Ehat[s_g\hat A_\tau] = \Ehat[s_g\hat A_g] \neq 0$ in general
+(Lemma~\ref{lem:agg}). Recovery to $\hat J_1$ \emph{fails in the simplified
+form} whenever the per-group mean of $\hat A$ is nonzero; the size of the
+failure is governed by $|s_g|\cdot|\Ehat[s_g\hat A_g]|$.
+
+\item \emph{Hypothetical novel variants} where the cross-level residual
+itself appears as a standalone regulariser, e.g.\
+$-\lambda\max(0, |s_g - s_{dom}|/\delta - 1)$ or an ANOVA-style term
+$\sum_z \|s_z - s_{\text{parent}(z)}\|^2$. Such terms do not involve
+$\hat A$ at all.
+\end{enumerate}
+
+In every item of Context II, the magnitude of $s_g$ (resp.\ $s_{dom}$) is
+not absorbed into a multiplication-by-advantage, and therefore the
+normalisation choice \emph{does} change the numerical behaviour of the
+objective.
+
+\begin{proposition}[Context II separates A2 from A3]
+\label{prop:ctx2}
+Under A2, $|s_g| = |g|\cdot|\smean_g|$ and $|s_{dom}| = |dom|\cdot|g|\cdot|\smean_{dom}|$
+where $\smean_g = |g|^{-1}\sum_{\tau\in g}s_\tau$ and
+$\smean_{dom} = (|dom|\cdot|g|)^{-1}\sum_{\tau\in dom}s_\tau$. Under A3,
+$|s_g| = |\smean_g|$ and $|s_{dom}| = |\smean_{dom}|$. Consequently, for
+any of the Context-II constructions above:
+\begin{itemize}
+\item A2 forces each level's hyperparameter ($\delta_z$ or $\lambda_z$) to
+carry the corresponding level-size factor ($|g|$, $|g|\cdot|dom|$). The
+hyperparameter is no longer a property of the policy-optimisation problem
+but a property of the \emph{batch composition}.
+\item A3 places all three levels on the same O($\varepsilon$) scale, so a
+single fundamental hyperparameter value applies uniformly, invariant to
+batch composition.
+\end{itemize}
+\end{proposition}
+
+This is the \emph{weak form} of the distinction. The user's objection
+``although the scale can be absorbed into $\lambda$'' is correct in a
+literal sense: A2 is not \emph{mathematically} wrong, one can always
+rescale hyperparameters. But the rescaling required is not a free choice;
+it is $(|g|, |dom|\cdot|g|)$-dependent, and therefore not canonical. The
+strong form of the distinction below makes the canonical argument.
+
+% =============================================================================
+\section{Canonical decomposition --- the unique characterisation of A3}
+
+Let $P$ denote the joint sampling distribution over trajectories, groups,
+and domains. Define the population-level quantities
+\[
+\mu_g := \mathbb{E}_{\tau\sim P(\cdot\mid g)}[s_\tau], \qquad
+\mu_{dom} := \mathbb{E}_{g\sim P(\cdot\mid dom)}[\mu_g].
+\]
+
+\begin{definition}[Canonical decomposition]
+\label{def:canonical}
+Given empirical estimators $(\widehat s_\tau,\widehat s_g,\widehat s_{dom})$,
+call the collection \emph{canonical} if all of the following hold for
+every batch:
+\begin{enumerate}
+\item[(C1)] $\widehat s_\tau$ is a consistent estimator of
+$\mathbb{E}_{t\sim\text{Unif}(\tau)}[r_t - 1]$, the within-trajectory
+population ratio drift.
+\item[(C2)] $\widehat s_g$ is the empirical conditional mean of
+$\widehat s_\tau$ over $\tau\in g$: $\widehat s_g = |g|^{-1}\sum_{\tau\in g}\widehat s_\tau$.
+\item[(C3)] $\widehat s_{dom}$ is the empirical conditional mean of
+$\widehat s_g$ over $g\in dom$: $\widehat s_{dom} = |dom|^{-1}\sum_{g\in dom}\widehat s_g$.
+\end{enumerate}
+\end{definition}
+
+\begin{theorem}[A3 is the unique canonical decomposition among A1--A3]
+\label{thm:unique}
+Of the three candidates,
+\begin{itemize}
+\item A1 violates (C1): $\widehat s_\tau^{\text{A1}} = |\tau|\cdot\smean_\tau$,
+which depends on the trajectory length and is not a consistent estimator
+of $\mathbb{E}[r_t-1]$ as $|\tau|\to\infty$.
+\item A2 satisfies (C1) but violates (C2) and (C3):
+$\widehat s_g^{\text{A2}} = \sum_{\tau\in g}\max(\pm s_\tau,0) \neq |g|^{-1}\sum_\tau s_\tau$
+whenever $|g|\neq 1$.
+\item A3 satisfies (C1), (C2), and (C3) by construction.
+\end{itemize}
+\end{theorem}
+
+\begin{proof}
+Direct from the definitions. For (C2) under A3: using the identity
+$\max(x,0)-\max(-x,0)=x$,
+\begin{align*}
+\widehat s_g^{\text{A3}} &= \widehat s_g^{+,\text{A3}} - \widehat s_g^{-,\text{A3}}
+= \tfrac{1}{|g|}\sum_{\tau\in g}\max(s_\tau,0) - \tfrac{1}{|g|}\sum_{\tau\in g}\max(-s_\tau,0) \\
+&= \tfrac{1}{|g|}\sum_{\tau\in g}\bigl[\max(s_\tau,0) - \max(-s_\tau,0)\bigr]
+= \tfrac{1}{|g|}\sum_{\tau\in g}s_\tau. \qed
+\end{align*}
+The same identity gives (C3).
+\end{proof}
+
+% =============================================================================
+\section{What (C1--C3) buy us that A2 does not}
+
+\subsection*{4.1 Law of total expectation at the empirical level}
+
+Under A3, (C2) and (C3) give the empirical law-of-total-expectation:
+\[
+\widehat s_{dom}
+= |dom|^{-1}\sum_{g\in dom}\widehat s_g
+= |dom|^{-1}\sum_{g\in dom}|g|^{-1}\sum_{\tau\in g}s_\tau
+= \underbrace{\bigl(|dom|^{-1}|g|^{-1}\bigr)}_{\text{weight}}\sum_{\tau\in dom}s_\tau,
+\]
+which, for balanced groups, coincides with the unweighted domain mean
+$(|dom|\cdot|g|)^{-1}\sum_{\tau\in dom}s_\tau$. Under A2 no such tower
+identity holds: $\widehat s_{dom}^{\text{A2}} = \sum_g\sum_\tau |s_\tau| \neq (\text{constant})\sum_\tau s_\tau$.
+
+\subsection*{4.2 ANOVA decomposition}
+
+\begin{proposition}
+\label{prop:anova}
+Under A3, for any $\tau \in g \in dom$,
+\[
+s_\tau \;=\; \widehat s_{dom} \;+\; (\widehat s_g - \widehat s_{dom}) \;+\; (s_\tau - \widehat s_g),
+\]
+and the three terms on the right form an orthogonal decomposition in the
+sense of Analysis of Variance:
+\begin{enumerate}
+\item $\Ehat_{\tau\in g}[s_\tau - \widehat s_g] = 0$ for every $g$ (within-group).
+\item $\Ehat_{g\in dom}[\widehat s_g - \widehat s_{dom}] = 0$ for every $dom$ (between-group within-domain).
+\item $\widehat s_{dom}$ is the unconditional mean at the domain level.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+Identities (1) and (2) follow directly from (C2) and (C3). The decomposition
+in the first line is trivially the telescoping sum. Orthogonality in the
+ANOVA sense follows from the fact that each component is a residual
+against the next level's mean.
+\end{proof}
+
+\begin{proposition}[A2 does not admit the ANOVA decomposition]
+Under A2, $\Ehat_{\tau\in g}[s_\tau - \widehat s_g^{\text{A2}}] =
+\widehat s_g^{\text{A3}} - \widehat s_g^{\text{A2}}
+= (1-|g|)\cdot\widehat s_g^{\text{A3}} \neq 0$ whenever $|g|>1$ and
+$\widehat s_g^{\text{A3}}\neq 0$.
+\end{proposition}
+
+\subsection*{4.3 Consistency of estimators at each level}
+
+A3 produces a consistent sequence of estimators for the population
+bisimulation distances at each level:
+\[
+\widehat s_g \xrightarrow{|g|\to\infty} \mu_g, \qquad
+\widehat s_{dom} \xrightarrow{|dom|\to\infty} \mu_{dom}.
+\]
+A2 produces estimators whose magnitude diverges with sample size:
+$\widehat s_g^{\text{A2}} = |g|\cdot\widehat s_g^{\text{A3}} \to \infty$ as
+$|g|\to\infty$ (assuming $\mu_g\neq 0$). For Variant 2 to admit a
+well-defined population limit under A2, one must also let the
+hyperparameters diverge in lockstep with the level size, which is the
+formal statement of ``the scale is absorbed into $\lambda$''; it is a
+\emph{rescaling of the mathematical objective} by a batch-composition
+factor, not a consistent statistical model.
+
+% =============================================================================
+\section{The decoupling property in Context II, precisely}
+
+Returning to the user's concern: if the subtraction $s_\tau-s_g$ (or
+$s_g-s_{dom}$) appears in a context \emph{outside} the $\Ehat\cdot\hat
+A_\tau$ form, we want it to carry information about the deviation of one
+level from the next, independent of batch composition.
+
+\begin{proposition}[Decoupling / interpretability of the subtraction]
+\label{prop:decouple}
+Under A3, $s_\tau - \widehat s_g$ has the interpretation of a
+within-group deviation, with
+\[
+\Ehat_{\tau\in g}[s_\tau - \widehat s_g] = 0
+\quad\text{and}\quad
+\Ehat_{\tau\in g}[(s_\tau - \widehat s_g)^2] = \text{within-group sample variance of }s_\tau.
+\]
+Under A2, $s_\tau - \widehat s_g^{\text{A2}} = s_\tau - |g|\cdot\widehat s_g^{\text{A3}}$,
+which has no interpretation as a deviation and is dominated by the
+$|g|\cdot\widehat s_g^{\text{A3}}$ term for any $|g|\geq 2$.
+\end{proposition}
+
+\begin{corollary}[Penalty / novel-variant safety]
+Any objective term of the form $\rho(s_\tau - \widehat s_g)$ with
+$\rho:\mathbb R\to\mathbb R_{\geq 0}$ convex and $\rho(0)=0$ penalises
+``trajectory drifts away from group centre'' under A3. Under A2, the
+same functional form penalises approximately $\rho(|g|\cdot\widehat s_g)$
+---a penalty on the group mean scaled by $|g|$, which has no relationship
+to the intended per-trajectory deviation.
+\end{corollary}
+
+\begin{proof}
+Direct consequence of Proposition~\ref{prop:decouple}.
+\end{proof}
+
+% =============================================================================
+\section{Conclusion}
+
+The user's diagnosis is correct: once we drop the GRPO zero-group-mean
+assumption and allow the cross-hierarchy subtraction to appear in
+contexts other than $\Ehat[\cdot]\hat A_\tau$, there \emph{is} a
+well-defined and principled distinction between A2 and A3. A3 is not
+merely preferable on engineering grounds (principle 2 / verl-alignment /
+single-$\delta$) but \emph{uniquely} canonical in the precise sense of
+Theorem~\ref{thm:unique}:
+
+\begin{enumerate}
+\item A3 is the only candidate that makes $\widehat s_g$ and
+$\widehat s_{dom}$ empirical conditional means of their respective
+children (C2, C3).
+\item A3 is the only candidate that yields an ANOVA decomposition of
+$s_\tau$ into within-group, between-group-within-domain, and domain
+components (Proposition~\ref{prop:anova}).
+\item A3 is the only candidate whose estimators converge to a
+batch-composition-independent population limit (\S4.3).
+\item Under A3 alone, a penalty of the form $\rho(s_\tau-\widehat s_g)$ or
+$\rho(\widehat s_g-\widehat s_{dom})$ with $\rho$ convex, $\rho(0)=0$
+admits the intended "deviation from level centre" interpretation
+(Proposition~\ref{prop:decouple}).
+\end{enumerate}
+
+A2 passes the narrower Context-I recovery test
+(Proposition~\ref{prop:ctx1}) but fails all four of the above
+structural properties the moment the subtraction is used anywhere
+outside the $\Ehat\cdot\hat A_\tau$ linear form. Absorbing the scale
+into $\lambda$ is a valid rescaling but not a canonical choice: it makes
+the hyperparameter a function of $|g|$ and $|dom|$, which is precisely
+what ``canonical'' rules out.
+
+The recommendation of A3 in \texttt{bisim\_eqs\_multidomain.tex}~\S3
+therefore stands on two independent and additive foundations: the
+engineering/infra alignment argument
+(\texttt{bisim\_eqs\_recovery.tex}~\S7) and the canonical-decomposition
+argument here.
+
+\end{document}

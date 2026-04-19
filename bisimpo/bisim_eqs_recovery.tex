@@ -1,0 +1,370 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+\newcommand{\smean}{s^{\text{MEAN}}}
+\newcommand{\ssum}{s^{\text{SUM}}}
+
+\title{Recovery Analysis: \\
+Which Normalisation of $s_\tau^\pm,\,s_g^\pm,\,s_{dom}^\pm$ Recovers the Default GRPO Objective at $\delta\to\infty$?}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We derive, under verl's \texttt{seq-mean-token-mean} aggregation, the
+unclipped limit of BSPO Variants 1 and 2 (simplified and full) for three
+candidate definitions of the ratio statistics: (A1) no division anywhere,
+(A2) division by $|\tau|$ only at the trajectory level, (A3) mean at every
+hierarchy level (our earlier proposal). The recovery criterion is that the
+unclipped BSPO objective equals the standard GRPO objective aggregated in
+the same way by verl's infra. We find: \textbf{A1 fails}, \textbf{A2 and A3
+both recover, for the same reason --- the $/|\tau|$ at the trajectory
+level}. Recovery alone therefore does not discriminate A2 from A3; the
+choice between them must be made on a separate criterion (practical
+clipping sensitivity, hyperparameter count, or numerical behaviour of the
+cross-hierarchy subtraction).
+\end{abstract}
+
+% =============================================================================
+\section{The target: what ``default RL objective'' means under verl's infra}
+\label{sec:target}
+
+Per principle~1 (do not change verl's infra), our BSPO aggregation is fixed
+to \texttt{seq-mean-token-mean}. Under this mode, the aggregator produces
+\[
+\mathcal L_{\text{SMTM}}(f) \;=\; \frac{1}{B_{\text{global}}}
+\sum_{i=1}^{B}\,\frac{1}{|\tau_i|}\sum_{t=1}^{|\tau_i|}\,f(i,t),
+\]
+where $f(i,t)$ is the per-token loss tensor (shape $(B,T)$).
+
+The standard GRPO per-token loss is $f_{\text{GRPO}}(i,t)=r_{i,t}\,\hat
+A_{\tau_i}$ (advantage broadcast; $r_{i,t}=\pi_\theta(a_t\mid
+s_t)/\pi_{\theta_{\text{old}}}(a_t\mid s_t)$). Substituting,
+\begin{align*}
+\mathcal L_{\text{SMTM}}(r\,\hat A)
+  &= \frac{1}{B}\sum_i \hat A_{\tau_i}\,\frac{1}{|\tau_i|}\sum_t r_{i,t} \\
+  &= \frac{1}{B}\sum_i \hat A_{\tau_i}\bigl(1 + \smean_{\tau_i}\bigr)
+   \quad\text{where }\smean_\tau := \frac{1}{|\tau|}\sum_t (r_t-1) \\
+  &= \underbrace{\frac{1}{B}\sum_i \hat A_{\tau_i}}_{=\,0\text{ under GRPO}}
+   + \frac{1}{B}\sum_i \hat A_{\tau_i}\,\smean_{\tau_i}.
+\end{align*}
+
+GRPO normalisation forces $\sum_{\tau\in g}\hat A_\tau = 0$ for every group
+with at least two members; with balanced groups across $B$, the first sum
+is exactly zero. Define
+\[
+\boxed{\quad J_\star \;:=\; \Ehat_\tau\bigl[\smean_\tau \cdot \hat A_\tau\bigr]
+        \;=\; \tfrac{1}{B}\sum_i \smean_{\tau_i}\,\hat A_{\tau_i}. \quad}
+\]
+This is the target: the unclipped BSPO objective must equal $J_\star$ at
+$\delta\to\infty$.
+
+The key observation is that $J_\star$ involves $\smean_\tau$, the
+\emph{trajectory mean} of the per-token ratio deviation. The $/|\tau|$ is
+built into the target by verl's aggregator itself.
+
+% =============================================================================
+\section{The three candidate normalisations}
+
+All three share the token-level deviation construction; they differ only
+in where the normalisers are placed.
+
+\paragraph{A1 (no division anywhere --- ``remove $/|\tau|$'').}
+\begin{align*}
+s_\tau^{\pm,\text{A1}}    &= \sum_{t\in\tau}\max\bigl(\pm(r_t-1),\,0\bigr) \\
+s_g^{\pm,\text{A1}}       &= \sum_{\tau\in g}\max\bigl(\pm s_\tau^{\text{A1}},\,0\bigr) \\
+s_{dom}^{\pm,\text{A1}}   &= \sum_{g\in dom}\max\bigl(\pm s_g^{\text{A1}},\,0\bigr)
+\end{align*}
+
+\paragraph{A2 (\textit{the only} normaliser is $/|\tau|$ at the trajectory level).}
+\begin{align*}
+s_\tau^{\pm,\text{A2}}    &= \frac{1}{|\tau|}\sum_{t\in\tau}\max\bigl(\pm(r_t-1),\,0\bigr) \\
+s_g^{\pm,\text{A2}}       &= \sum_{\tau\in g}\max\bigl(\pm s_\tau^{\text{A2}},\,0\bigr) \\
+s_{dom}^{\pm,\text{A2}}   &= \sum_{g\in dom}\max\bigl(\pm s_g^{\text{A2}},\,0\bigr)
+\end{align*}
+
+\paragraph{A3 (mean at every level --- the section~3 edit in \texttt{bisim\_eqs\_multidomain.tex}).}
+\begin{align*}
+s_\tau^{\pm,\text{A3}}    &= \frac{1}{|\tau|}\sum_{t\in\tau}\max\bigl(\pm(r_t-1),\,0\bigr) \\
+s_g^{\pm,\text{A3}}       &= \frac{1}{|g|}\sum_{\tau\in g}\max\bigl(\pm s_\tau^{\text{A3}},\,0\bigr) \\
+s_{dom}^{\pm,\text{A3}}   &= \frac{1}{|dom|}\sum_{g\in dom}\max\bigl(\pm s_g^{\text{A3}},\,0\bigr)
+\end{align*}
+
+In all three, $s_z = s_z^+ - s_z^-$ by the identity $\max(x,0)-\max(-x,0)=x$.
+
+% =============================================================================
+\section{Useful identities}
+\label{sec:identities}
+
+The following are purely algebraic; they hold for all three variants.
+
+\begin{lemma}[Trajectory identity]
+\label{lem:tau}
+For any definition of $s_\tau^\pm$ that uses $\max(\pm x,\,0)$ decomposition,
+$s_\tau \;=\; \sum_t\alpha_\tau\,(r_t-1)$, with the prefactor
+$\alpha_\tau = 1$ under A1 and $\alpha_\tau = 1/|\tau|$ under A2/A3.
+In particular, $s_\tau^{\text{A1}} = |\tau|\,\smean_\tau$ and
+$s_\tau^{\text{A2}} = s_\tau^{\text{A3}} = \smean_\tau$.
+\end{lemma}
+
+\begin{lemma}[Group-/domain-level $s_z$ are constants on their support]
+\label{lem:const}
+$s_g$ depends only on $g$ (not on $\tau$ within $g$). $s_{dom}$ depends
+only on $dom$. This holds under all three normalisations.
+\end{lemma}
+
+\begin{lemma}[GRPO zero-group-mean]
+\label{lem:grpo}
+Under GRPO trajectory-level advantage normalisation with group size
+$\geq 2$,
+\[
+\sum_{\tau\in g}\hat A_\tau \;=\; 0 \quad\text{for every }g.
+\]
+Consequently, if $\hat A_g := (1/|g|)\sum_{\tau\in g}\hat A_\tau$ and
+$\hat A_{dom}$ is any linear aggregation of $\{\hat A_g\}$, then
+$\hat A_g = 0$ and $\hat A_{dom}=0$.
+\end{lemma}
+
+\begin{lemma}[Higher-level constants vanish against $\hat A_\tau$]
+\label{lem:vanish}
+For any group-level constant $c_g$ and any domain-level constant $c_{dom}$,
+\[
+\Ehat_\tau\bigl[c_{g(\tau)}\,\hat A_\tau\bigr] \;=\; 0,
+\qquad
+\Ehat_\tau\bigl[c_{dom(\tau)}\,\hat A_\tau\bigr] \;=\; 0,
+\]
+where $g(\tau)$ is the group containing $\tau$ and $dom(\tau)$ is its domain.
+\end{lemma}
+\begin{proof}
+$\Ehat_\tau[c_g\,\hat A_\tau] = \tfrac{1}{B}\sum_g\sum_{\tau\in g}
+c_g\,\hat A_\tau = \tfrac{1}{B}\sum_g c_g\sum_{\tau\in g}\hat A_\tau = 0$
+by Lemma~\ref{lem:grpo}. Similarly for $c_{dom}$.
+\end{proof}
+
+% =============================================================================
+\section{Variant 1 unclipped}
+
+Variant 1 simplest: $\hat J_1 = \Ehat_\tau\bigl[\Delta_\tau^{(\text{reg})}\,\hat A_\tau\bigr]$.
+At $\delta\to\infty$, $\clip(s_\tau^{\pm},\delta)\to s_\tau^{\pm}$ and so
+$\Delta_\tau^{(\text{reg})} \to s_\tau^+ - s_\tau^- = s_\tau$.
+
+Thus $\hat J_1^{(\text{unclipped})} = \Ehat_\tau[s_\tau\,\hat A_\tau]$.
+
+Substituting Lemma~\ref{lem:tau}:
+
+\begin{center}
+\begin{tabular}{l l l}
+\textbf{Approach} & \textbf{$s_\tau$} & \textbf{$\hat J_1^{(\infty)}$} \\ \hline
+A1  & $|\tau|\,\smean_\tau$ & $\Ehat_\tau\bigl[|\tau|\,\smean_\tau\,\hat A_\tau\bigr]$ \\
+A2  & $\smean_\tau$ & $\Ehat_\tau\bigl[\smean_\tau\,\hat A_\tau\bigr] \;=\; J_\star$ \\
+A3  & $\smean_\tau$ & $\Ehat_\tau\bigl[\smean_\tau\,\hat A_\tau\bigr] \;=\; J_\star$ \\
+\end{tabular}
+\end{center}
+
+A1 produces the wrong $\smean_\tau\cdot\hat A_\tau$ \emph{weighted by
+$|\tau|$}. For $|\tau|$ uniform across the batch this is a constant
+rescaling (benign); for mixed-length batches (always the case in practice)
+this is not $J_\star$. \textbf{A1 fails Variant~1 recovery.}
+
+A2 and A3 recover $J_\star$ identically because they place the same
+$/|\tau|$ at the trajectory level.
+
+% =============================================================================
+\section{Variant 2 unclipped (simplified form)}
+
+Simplified Variant 2: $\hat J_2 = \Ehat_\tau\bigl[(\Delta_\tau^{(\text{reg})} - \Delta_g^{(\text{reg})})\,\hat A_\tau\bigr]$.
+At $\delta\to\infty$, $\Delta_\tau^{(\text{reg})}\to s_\tau$ and
+$\Delta_g^{(\text{reg})}\to s_g$ (both with the signs of $s$).
+
+\[
+\hat J_2^{(\text{unclipped})}
+  = \Ehat_\tau\bigl[s_\tau\,\hat A_\tau\bigr]
+   - \Ehat_\tau\bigl[s_{g(\tau)}\,\hat A_\tau\bigr].
+\]
+
+By Lemma~\ref{lem:const} $s_g$ is a group-level constant; by
+Lemma~\ref{lem:vanish} its product with $\hat A_\tau$ averages to zero
+under GRPO \emph{regardless of how $s_g$ is normalised}.
+
+\[
+\hat J_2^{(\text{unclipped})} \;=\; \Ehat_\tau[s_\tau\,\hat A_\tau] \;-\; 0.
+\]
+
+Recovery status is therefore identical to Variant~1:
+
+\begin{center}
+\begin{tabular}{l l}
+\textbf{Approach} & \textbf{$\hat J_2^{(\infty)}$} \\ \hline
+A1 & $\Ehat_\tau\bigl[|\tau|\,\smean_\tau\,\hat A_\tau\bigr]$ (fails) \\
+A2 & $J_\star$ (recovers) \\
+A3 & $J_\star$ (recovers) \\
+\end{tabular}
+\end{center}
+
+\textbf{Crucial observation.} The normalisation choice on $s_g$ (sum vs.\
+mean over $\tau\in g$) has \emph{no effect} on the unclipped recovery. Both
+A2 and A3 succeed, and they succeed for exactly the same reason: $s_g$ is
+a group-level constant, and any group-level constant pushed through
+$\Ehat_\tau$ with $\hat A_\tau$ vanishes under GRPO's zero-group-mean
+property. The absolute scale of $s_g$ is irrelevant to this identity.
+
+% =============================================================================
+\section{Variant 2 unclipped (full hierarchical form)}
+
+Full Variant 2 before telescoping:
+\[
+\hat J_2^{\text{full}}
+  = \Ehat_\tau\bigl[\Delta_{dom}^{(\text{reg})}\,\hat A_{dom}
+       + (\Delta_g^{(\text{reg})}-\Delta_{dom}^{(\text{reg})})\,\hat A_g
+       + (\Delta_\tau^{(\text{reg})}-\Delta_g^{(\text{reg})})\,\hat A_\tau\bigr].
+\]
+
+At $\delta\to\infty$ and using Lemma~\ref{lem:grpo} ($\hat A_g = \hat A_{dom} = 0$):
+\begin{align*}
+\hat J_2^{\text{full}\,(\text{unclipped})}
+  &= \Ehat_\tau\bigl[s_{dom}\cdot 0 + (s_g-s_{dom})\cdot 0 + (s_\tau-s_g)\,\hat A_\tau\bigr] \\
+  &= \Ehat_\tau\bigl[(s_\tau-s_g)\,\hat A_\tau\bigr] \\
+  &= \Ehat_\tau[s_\tau\,\hat A_\tau] - 0
+   \qquad\text{(Lemma~\ref{lem:vanish})}.
+\end{align*}
+
+Recovery status identical to the simplified form. A1 fails; A2 and A3
+recover.
+
+% =============================================================================
+\section{Why the normalisation at $g$ and $dom$ is invisible to the recovery criterion}
+
+The identities in \S\ref{sec:identities} make it explicit:
+
+\begin{enumerate}
+\item $s_g$ and $s_{dom}$ appear in the unclipped objective \emph{only
+multiplied against $\hat A_\tau$, $\hat A_g$, or $\hat A_{dom}$}.
+\item All three advantage terms vanish in expectation under GRPO
+(Lemmas~\ref{lem:grpo}, \ref{lem:vanish}).
+\item The magnitude of $s_g$ and $s_{dom}$ is therefore absorbed into a
+multiplication-by-zero at the expectation level.
+\end{enumerate}
+
+As a result, \textbf{the unclipped-recovery criterion cannot distinguish
+between A2 and A3}. It only distinguishes them from A1 (which fails because
+$s_\tau$ itself acquires a spurious $|\tau|$ factor that does \emph{not}
+vanish against $\hat A_\tau$).
+
+This answers the user's original concern: ``can we still recover the
+default GRPO objective when $s_g$ and $s_{dom}$ are at different scales?''
+\textbf{Yes, for the same structural reason in both A2 and A3.} The
+trajectory-level $/|\tau|$ is the load-bearing ingredient; the higher-level
+normalisations only matter for finite-$\delta$ clipping behaviour.
+
+% =============================================================================
+\section{The canonical division factor determined by the recovery rule}
+
+Collecting the derivations: among the three candidates considered, the
+\emph{minimum requirement} imposed by the recovery rule is
+
+\[
+\boxed{\quad
+s_\tau^\pm \text{ must contain a factor of }\tfrac{1}{|\tau|}\text{ inside the one-sided token sums.}
+\quad}
+\]
+
+Higher-level normalisations are \emph{undetermined} by recovery alone.
+Formally, the recovery rule admits the entire family
+\[
+s_z^{\pm,\alpha_z}
+  \;=\; \alpha_z \sum_{\text{members of }z}\max\bigl(\pm s_{\text{child}},\,0\bigr),
+  \qquad z\in\{g, dom\},
+\]
+for any positive weights $\{\alpha_g,\alpha_{dom}\}$. A2 picks
+$\alpha_g=\alpha_{dom}=1$ (pure sums); A3 picks
+$\alpha_g=1/|g|,\alpha_{dom}=1/|dom|$ (means). Both satisfy recovery.
+
+% =============================================================================
+\section{Separating criteria (not recovery): what differs between A2 and A3}
+
+Since recovery does not discriminate, we summarise the practical
+differences for a downstream choice:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l l l}
+\textbf{Property} & \textbf{A2} & \textbf{A3} \\ \hline
+$s_\tau$ scale        & $O(\varepsilon)$                & $O(\varepsilon)$ \\
+$s_g$ scale           & $O(|g|\cdot\varepsilon)$        & $O(\varepsilon)$ \\
+$s_{dom}$ scale       & $O(|dom|\cdot|g|\cdot\varepsilon)$ & $O(\varepsilon)$ \\
+$\delta$ hyperparam count (if all levels must not saturate) & 3 distinct scales & 1 scale \\
+Reduction primitive in verl       & custom \texttt{scatter\_sum}   & \texttt{scatter\_mean} (already used) \\
+Value of $\Delta_\tau^{\text{(reg)}}-\Delta_g^{\text{(reg)}}$ at finite $\delta$ & dominated by $\Delta_g$ when $\delta_g < |g|\,\varepsilon$ & deviation-from-mean, bounded by $\delta$ \\
+\end{tabular}
+\end{center}
+
+The user's own characterisation (``token ratio naturally has much higher
+average magnitude than trajectory agg ratio \ldots\ we anticipate to
+subtract the smaller scale from higher part of the hierarchy'') matches
+the A2 scale cascade only in the direction \emph{higher-hierarchy is
+larger, not smaller}. Under A2, $|s_g|\geq|s_\tau|$; under A3, all three
+are comparable. If the stated preference is ``higher hierarchy holds a
+smaller-scale correction that is \emph{subtracted from} the lower-level
+quantity,'' this is realised exactly by A3 under the finite-batch
+variance interpretation: $s_g$ is a $1/\sqrt{|g|}$-contracted estimator
+of the group mean of $s_\tau$, and $s_\tau - s_g$ is a mean-centred
+deviation whose magnitude is bounded by the within-group spread of
+$s_\tau$ rather than by $|s_\tau|$ itself.
+
+% =============================================================================
+\section{Explicit failure of A1: worked micro-example}
+
+Take a batch of two trajectories:
+\begin{itemize}
+\item $\tau_1$: $|\tau_1|=3$, ratios $[1.1,\;1.0,\;1.2]$, so $\smean_{\tau_1}=0.1$.
+\item $\tau_2$: $|\tau_2|=300$, ratios all $1.001$ except one token at
+      $1.0$, so $\smean_{\tau_2}\approx 0.001$.
+\end{itemize}
+Assume for simplicity one group containing both, with GRPO advantages
+$\hat A_{\tau_1}=+1,\ \hat A_{\tau_2}=-1$ (satisfying zero-group-mean).
+
+\noindent\textbf{Target.}
+$J_\star = \tfrac{1}{2}\bigl(0.1\cdot 1 + 0.001\cdot(-1)\bigr) = 0.0495$.
+
+\noindent\textbf{A1} ($s_\tau^{\text{A1}}=|\tau|\smean$): \;
+$s_{\tau_1}=0.3,\ s_{\tau_2}\approx 0.3$. \\
+$\hat J_1^{(\text{A1, unclipped})}
+= \tfrac{1}{2}(0.3\cdot 1 + 0.3\cdot(-1)) = 0$.
+
+\noindent\textbf{A2 / A3} ($s_\tau=\smean_\tau$): \;
+$\hat J_1^{(\text{A2/A3, unclipped})}
+= \tfrac{1}{2}(0.1\cdot 1 + 0.001\cdot(-1)) = 0.0495 = J_\star$.
+
+A1 returns $0$ for an example where $J_\star=0.0495$: a $50\times$ error
+in relative terms, purely from the $|\tau|$-weighting bias. A2 and A3
+return the exact target.
+
+% =============================================================================
+\section{Conclusion}
+
+\begin{itemize}
+\item \textbf{A1 is ruled out by recovery.} The $/|\tau|$ at the
+      trajectory level is load-bearing and cannot be removed.
+\item \textbf{A2 and A3 both satisfy recovery.} The higher-level
+      normalisation (sum vs.\ mean) is invisible to the unclipped-limit
+      criterion.
+\item \textbf{The canonical factor determined by recovery alone is
+      $1/|\tau|$ on $s_\tau^\pm$, nothing else.}
+\item \textbf{To choose between A2 and A3 one must invoke a criterion
+      beyond recovery}, e.g.\ clipping sensitivity at finite $\delta$,
+      hyperparameter count, subtraction magnitude, or alignment with
+      verl's existing \texttt{scatter\_mean} primitive. On those grounds
+      A3 is preferable, but the recovery property itself does not force
+      it.
+\end{itemize}
+
+\end{document}
