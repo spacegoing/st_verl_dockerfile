@@ -25,9 +25,11 @@ EXTRA_USER="${*:-}"
 # ── Per-combo BSPO hparams ────────────────────────────────────────────────────
 case "$COMBO_ID" in
     # ── debug smoke combos (fast-fail) ──
-    cbdg-md-v1-smoke)  VAR=simplest;         DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
-    cbdg-md-v4-smoke)  VAR=w_penalty;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
-    cbdg-md-v5-smoke)  VAR=w_penalty_only;   DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v1-smoke)  VAR=simplest;           DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v2-smoke)  VAR=hierarchy;          DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v3-smoke)  VAR=strict_wasserstein; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v4-smoke)  VAR=w_penalty;          DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v5-smoke)  VAR=w_penalty_only;     DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
 
     # ── formal V1..V5 multi-domain runs ──
     cbmd-v1)           VAR=simplest;         DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;

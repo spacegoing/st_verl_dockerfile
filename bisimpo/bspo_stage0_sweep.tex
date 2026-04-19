@@ -155,19 +155,23 @@ bspo_agg_delta_tok: 0.2       # gsPO per-token scale
 \toprule
 combo\_id & block & V & S & A & T & L & notes \\
 \midrule
-\verb|cbsp101| & obj baseline   & V1 & S1 & A1 & T1 & L3 & simplest \\
-\verb|cbsp102| & obj baseline   & V2 & S1 & A1 & T1 & L3 & hierarchy, needs $s_g$ \\
-\verb|cbsp103| & obj baseline   & V3 & S1 & A1 & T1 & L3 & strict Wasserstein, needs $s_g, s_{dom}$ \\
-\verb|cbsp104| & obj baseline   & V4 & S1 & A1 & T1 & L3 & w\_penalty \\
-\verb|cbsp105| & obj baseline   & V5 & S1 & A1 & T1 & L3 & w\_penalty\_only \\
+\verb|cbsp101| (legacy) & obj baseline   & V1 & S1 & A1 & T1 & L3 & simplest (aka \texttt{cbsp-v1-base}) \\
+\verb|cbsp103| (legacy) & obj baseline   & V4 & S1 & A1 & T1 & L3 & w\_penalty (aka \texttt{cbsp-v4-base}) \\
+\verb|cbsp104| (legacy) & obj baseline   & V5 & S1 & A1 & T1 & L3 & w\_penalty\_only (aka \texttt{cbsp-v5-base}) \\
 \midrule
-\verb|cbsp114| & sign on V4     & V4 & S2 & A1 & T1 & L3 & V4 + near-fault bias \\
-\verb|cbsp115| & sign on V4     & V4 & S3 & A1 & T1 & L3 & V4 + case-patch autograd \\
-\midrule
-\verb|cbsp125| & agg on V5      & V5 & S1 & A2 & T1 & L3 & V5 + fiberPO residue \\
+\verb|cbsp-v4-s2| (*)   & sign on V4     & V4 & S2 & A1 & T1 & L3 & V4 + near-fault bias \\
+\verb|cbsp-v4-s3| (*)   & sign on V4     & V4 & S3 & A1 & T1 & L3 & V4 + case-patch autograd \\
+\verb|cbsp-v5-a2| (*)   & agg on V5      & V5 & S1 & A2 & T1 & L3 & V5 + fiberPO residue \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+(*) = not yet in \texttt{combo\_40Bra.yaml}; will be added when the S2/S3
+sign variants and A2 fiberPO aggregation ship (separate from MD-S3).
+V2 (\texttt{hierarchy}) and V3 (\texttt{strict\_wasserstein}) are
+\emph{not} included in the single-domain block per
+\texttt{bspo\_algorithm.tex}~\S1 (single-domain defines V1/V4/V5 only);
+V2/V3 appear in the multi-domain block below.
 
 \paragraph{Rationale for the secondary axes.}
 $S_2, S_3$ on V4 and not on V5: V4 uses
@@ -195,14 +199,19 @@ have $28$, so 7 run concurrently and 1 queues).
 \toprule
 combo\_id & block & V & S & A & T & L & notes \\
 \midrule
-\verb|cbsp201| & obj baseline   & V1 & S1 & A1 & T1 & L3 & simplest, all domains \\
-\verb|cbsp202| & obj baseline   & V2 & S1 & A1 & T1 & L3 & hierarchy \\
-\verb|cbsp203| & obj baseline   & V3 & S1 & A1 & T1 & L3 & strict Wasserstein \\
-\verb|cbsp204| & obj baseline   & V4 & S1 & A1 & T1 & L3 & w\_penalty \\
-\verb|cbsp205| & obj baseline   & V5 & S1 & A1 & T1 & L3 & w\_penalty\_only \\
+\verb|cbmd-v1| & obj baseline   & V1 & S1 & A1 & T1 & L3 & simplest, all domains \\
+\verb|cbmd-v2| & obj baseline   & V2 & S1 & A1 & T1 & L3 & hierarchy (needs S3 code) \\
+\verb|cbmd-v3| & obj baseline   & V3 & S1 & A1 & T1 & L3 & strict Wasserstein (needs S3 code) \\
+\verb|cbmd-v4| & obj baseline   & V4 & S1 & A1 & T1 & L3 & w\_penalty \\
+\verb|cbmd-v5| & obj baseline   & V5 & S1 & A1 & T1 & L3 & w\_penalty\_only \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+Debug combos for smoke iteration on the 2-node debug env:
+\verb|cbdg-md-v1-smoke|, \verb|cbdg-md-v4-smoke|, \verb|cbdg-md-v5-smoke|
+(1-step, 16-sample val, \texttt{NNODES=2}). V2/V3 debug combos will be
+added once V2/V3 multi-domain have been smoke-verified.
 
 \paragraph{Training data.}
 Multi-domain train set: \verb|0320_split/train.parquet| with all six

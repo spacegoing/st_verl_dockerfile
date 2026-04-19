@@ -72,14 +72,27 @@ cdbgmd1 is expected to run ~8h after submission.
 name per pre-rename scheme.
 
 **2026-04-19 13:00 UTC** — **rename + 2-node debug switch**.
-- Legacy `cdbgmd1` rayjob (queued, 4-node) deleted.
-- Resubmitted as **`cbdg-md-v1-smoke`** under the new naming scheme,
-  on **NNODES=2** (new env `k8s_b300_2node_debug.yaml`,
-  minimum-viable-shape for 40Bra-16B: PP=2·EP=8·TP=1 = 16 GPU).
-  RayJob: `bra40-md-cbdg-md-v1-smoke-2n-swb9b`.
-- submit_bspo_md.sh auto-sets NNODES=2 + BSPO_DEBUG=1 for any combo
-  whose id starts with `cbdg-`.
-- cbdg-md-v1-smoke is queued behind the 7 single-domain formal runs
-  saturating the cluster. Starts when one of those ends (~2h).
+Resubmitted as `cbdg-md-v1-smoke` on NNODES=2. RayJob
+`bra40-md-cbdg-md-v1-smoke-2n-swb9b`. Started within 2 min in the
+3-node gap (28 used by single-domain + 3 free).
 
-Will update here with smoke outcome when it lands.
+**2026-04-19 13:07 UTC** — **Smoke v1 FAILED** at dataset-load time.
+
+Root cause: `KeyError: "extra_info missing key 'jd_pass_rate'. Available:
+[..., 'nemo_pass_rate', ...]"`.
+
+The multi-domain training set `nemogym_blend/train_v2.parquet` carries
+`nemo_pass_rate` in `extra_info`, not `jd_pass_rate` (which is what the
+single-domain `0320_split/train.parquet` uses). The curriculum sampler
+in `40bra_16node_md.yaml` was forked from the single-domain config and
+retained `pass_rate_key: jd_pass_rate`.
+
+Fix: changed `pass_rate_key: nemo_pass_rate` in
+`verl/my_scripts/k8s/config/40bra_16node_md.yaml`. This is strictly an
+md-side key choice; single-domain config is unaffected.
+
+**2026-04-19 13:08 UTC** — **Smoke v2 submitted**.
+RayJob: `bra40-md-cbdg-md-v1-smoke-2n-8k2x8`. Monitor task
+`bzyahikcy` armed. Running within seconds (2-node slot free).
+
+Will update here with v2 outcome when it lands.
