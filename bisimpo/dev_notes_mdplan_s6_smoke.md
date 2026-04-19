@@ -68,8 +68,18 @@ cdbgmd1 is expected to run ~8h after submission.
 
 ## Dev notes / execution log
 
-**2026-04-19 08:38 UTC** — cdbgmd1 submitted; currently queued. Will be
-monitored opportunistically as Phase-1 v2 completes and frees 4-node
-slots.
+**2026-04-19 08:38 UTC** — cdbgmd1 submitted; currently queued. Legacy
+name per pre-rename scheme.
+
+**2026-04-19 13:00 UTC** — **rename + 2-node debug switch**.
+- Legacy `cdbgmd1` rayjob (queued, 4-node) deleted.
+- Resubmitted as **`cbdg-md-v1-smoke`** under the new naming scheme,
+  on **NNODES=2** (new env `k8s_b300_2node_debug.yaml`,
+  minimum-viable-shape for 40Bra-16B: PP=2·EP=8·TP=1 = 16 GPU).
+  RayJob: `bra40-md-cbdg-md-v1-smoke-2n-swb9b`.
+- submit_bspo_md.sh auto-sets NNODES=2 + BSPO_DEBUG=1 for any combo
+  whose id starts with `cbdg-`.
+- cbdg-md-v1-smoke is queued behind the 7 single-domain formal runs
+  saturating the cluster. Starts when one of those ends (~2h).
 
 Will update here with smoke outcome when it lands.
