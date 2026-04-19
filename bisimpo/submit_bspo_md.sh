@@ -42,8 +42,9 @@ case "$COMBO_ID" in
 esac
 
 # ── BSPO override string ──────────────────────────────────────────────────────
+# Multi-domain uses loss_mode=bspo_md (separate fn from single-domain 'bspo').
 BSPO_OVR=(
-    "actor_rollout_ref.actor.policy_loss.loss_mode=bspo"
+    "actor_rollout_ref.actor.policy_loss.loss_mode=bspo_md"
     "actor_rollout_ref.actor.bspo_variant=$VAR"
     "actor_rollout_ref.actor.bspo_delta=$DELTA"
     "actor_rollout_ref.actor.bspo_lambda_tj=$LAMBDA"
