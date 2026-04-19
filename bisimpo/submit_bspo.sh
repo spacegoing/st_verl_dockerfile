@@ -44,9 +44,11 @@ case "$COMBO_ID" in
     cbsp302)       VAR=w_penalty;      DELTA=3.0e-4; LAMBDA=1.0e-2; LR_WARMUP=10 ;; # V4 stronger penalty (addresses s_tau drift)
     cbsp303|cbsp304|cbsp305|cbsp306|cbsp307|cbsp308|cbsp309)
                     VAR=w_penalty;      DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # reserved slots
-    cbsp401)       VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-2; LR_WARMUP=10 ;; # V5 stronger penalty
+    cbsp401)       VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-2; LR_WARMUP=10 ;; # V5 stronger penalty (LEGACY name; will be deleted)
     cbsp402|cbsp403|cbsp404|cbsp405|cbsp406|cbsp407|cbsp408|cbsp409)
                     VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # reserved slots
+    # ── New-style names (cbsp-v<N>-<suffix>) ─────────────────────────────
+    cbsp-v5-l1e2)  VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-2; LR_WARMUP=10 ;; # replaces legacy cbsp401
     *)  echo "error: unknown BSPO combo '$COMBO_ID'" >&2; exit 2 ;;
 esac
 

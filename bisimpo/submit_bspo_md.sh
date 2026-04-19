@@ -24,17 +24,17 @@ EXTRA_USER="${*:-}"
 
 # ── Per-combo BSPO hparams ────────────────────────────────────────────────────
 case "$COMBO_ID" in
-    # ── debug combos (fast-fail smoke) ──
-    cdbgmd1)      VAR=simplest;         DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
-    cdbgmd4)      VAR=w_penalty;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
-    cdbgmd5)      VAR=w_penalty_only;   DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    # ── debug smoke combos (fast-fail) ──
+    cbdg-md-v1-smoke)  VAR=simplest;         DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v4-smoke)  VAR=w_penalty;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
+    cbdg-md-v5-smoke)  VAR=w_penalty_only;   DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=0 ;;
 
     # ── formal V1..V5 multi-domain runs ──
-    cbsp501)      VAR=simplest;         DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
-    cbsp502)      VAR=hierarchy;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # needs S3 code
-    cbsp503)      VAR=strict_wasserstein; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # needs S3 code
-    cbsp504)      VAR=w_penalty;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
-    cbsp505)      VAR=w_penalty_only;   DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
+    cbmd-v1)           VAR=simplest;         DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
+    cbmd-v2)           VAR=hierarchy;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
+    cbmd-v3)           VAR=strict_wasserstein; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
+    cbmd-v4)           VAR=w_penalty;        DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
+    cbmd-v5)           VAR=w_penalty_only;   DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
 
     *)  echo "error: unknown BSPO-MD combo '$COMBO_ID'" >&2; exit 2 ;;
 esac
@@ -57,10 +57,11 @@ ABLATE_OVR=(
 
 ALL_OVR="${BSPO_OVR[*]} ${ABLATE_OVR[*]} ${EXTRA_USER}"
 
-# Debug combos default to 4 nodes + BSPO_DEBUG=1; formal default to 16.
+# Debug combos default to 2 nodes + BSPO_DEBUG=1 (minimum viable shape);
+# formal default to 4 nodes (C11 profile, 7-concurrent budget on 28 nodes).
 case "$COMBO_ID" in
-    cdbgmd*)  DEFAULT_NNODES=4;  DEFAULT_DEBUG=1 ;;
-    *)        DEFAULT_NNODES=16; DEFAULT_DEBUG=0 ;;
+    cbdg-*)    DEFAULT_NNODES=2; DEFAULT_DEBUG=1 ;;
+    *)         DEFAULT_NNODES=4; DEFAULT_DEBUG=0 ;;
 esac
 
 echo "[submit_bspo_md] combo=$COMBO_ID variant=$VAR delta=$DELTA lambda=$LAMBDA"
