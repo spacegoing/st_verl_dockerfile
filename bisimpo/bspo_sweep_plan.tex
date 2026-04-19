@@ -1,0 +1,479 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\small\ttfamily,
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  numbers=none,
+  frame=single,
+  language=Python,
+}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+
+\title{BSPO Sweep Design \\
+\large Math and Implementation for Four Prioritised Sweep Axes}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+% =============================================================================
+\section{Sweep priorities and scope}
+
+We sweep four design axes, ranked by expected impact on the final
+optimisation. A later axis is swept only on the winner of the earlier
+axis.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{c l l c}
+\toprule
+priority & axis & values swept & \# runs \\
+\midrule
+0 (highest) & Objective variant                         & V1, V2, V3, V4, V5 & 5 \\
+1           & Sign-gradient handling                    & S1, S2, S3         & 3 \\
+2           & Empirical aggregation (agg\_loss)         & A1, A2             & 2 \\
+3           & Trajectory-level length normaliser        & T1, T2             & 2 \\
+3.1         & \texttt{loss\_agg\_mode}                  & L1, L2, L3         & 3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Cartesian budget} (if all combinations were run independently):
+$5 \times 3 \times 2 \times 2 \times 3 = 180$. \textbf{Prioritised budget}:
+$5 + 2 + 1 + 1 + 2 = 11$ (each new axis inherits the best of the
+previous; only non-default values add runs). Phase-1 confirmed the
+ablation cost of $\sim 20$h/run on the C11 4-node profile, so the full
+prioritised sweep fits in $\sim 9$ days wall-clock with three concurrent
+runs.
+
+\textbf{Fixed across all sweeps.} Eval set is the 230-row hard parquet
+(BeyondAIME 100 + AIME25 30 + OlympiadBench 100). Reward manager is
+\verb|nemogym_server| routing all three data sources to the math judge.
+Compute profile is k8s 4-node C11. Training length is 120 steps,
+\verb|test_freq=10|, \verb|val_before_train=true|,
+\verb|save_freq=9999|.
+
+% =============================================================================
+\section{D0 (priority 0) --- Objective variant}
+\label{sec:d0}
+
+The five variants from \texttt{bspo\_algorithm.tex}~\S2. Per-trajectory
+objective $\ell_\tau$, aggregated by the default agg scheme (A1 below).
+
+\begin{align*}
+\text{V1 (simplest)}       &: \ell_\tau = \Delta_\tau^{(\text{reg})}\,\hat A_\tau \\
+\text{V2 (hierarchy, reg)} &: \ell_\tau = \bigl(\Delta_\tau^{(\text{reg})} - \Delta_{g(\tau)}^{(\text{reg})}\bigr)\,\hat A_\tau \\
+\text{V3 (strict Wasserstein)} &: \ell_\tau =
+  \Delta_{dom(\tau)}^{(W)}\,\hat A_{dom(\tau)}
+  + \Delta_{g(\tau)}^{(W)}\,\hat A_{g(\tau)}
+  + \Delta_\tau^{(W)}\,\hat A_\tau \\
+\text{V4 (W penalty)} &: \ell_\tau = \Delta_\tau^{(W)}\,\hat A_\tau
+  - \lambda_{\operatorname{Tj}}\mathrm{pen}_\tau
+  - \lambda_{\operatorname{Grp}}\mathrm{pen}_{g(\tau)}
+  - \lambda_{\text{D}}\mathrm{pen}_{dom(\tau)} \\
+\text{V5 (W penalty only)} &: \ell_\tau = s_\tau\,\hat A_\tau
+  - \lambda_{\operatorname{Tj}}\mathrm{pen}_\tau
+  - \lambda_{\operatorname{Grp}}\mathrm{pen}_{g(\tau)}
+  - \lambda_{\text{D}}\mathrm{pen}_{dom(\tau)}
+\end{align*}
+
+For the initial single-domain phase, $\Delta_g^{(\cdot)}$,
+$\Delta_{dom}^{(\cdot)}$, $\mathrm{pen}_g$, $\mathrm{pen}_{dom}$ reduce
+to no-ops (single data source); effectively V1, V4, V5 are active and
+V2, V3 collapse to V1. The multi-domain sweep activates V2 and V3.
+
+\paragraph{Combo IDs.}
+\verb|cbsp101| (V1), \verb|cbsp102| (V2 reduced), \verb|cbsp103| (V4),
+\verb|cbsp104| (V5). V3 collapses to V1 in single-domain; it will get
+its own combo family when the multi-domain train set is activated.
+
+% =============================================================================
+\section{D1 (priority 1) --- Sign-gradient handling}
+\label{sec:d1}
+
+The factor $\sign(s_z)$ in
+$\Delta_z^{(W)} = \sign(s_z)\cdot\clip(\min(s_z^+,s_z^-),\,\delta_z)$ has
+zero gradient a.e. We sweep three concrete treatments.
+
+\subsection{S1 --- Stop-loss (\texttt{.detach()}) [current baseline]}
+
+\[
+\sign_1(s) = \sign(s), \qquad \frac{\mathrm d \sign_1}{\mathrm d s} \equiv 0.
+\]
+
+\begin{lstlisting}
+# S1: stop-loss / detach
+sign_s  = torch.sign(s_tau).detach()
+delta_w = sign_s * torch.clamp(
+    torch.minimum(s_pos, s_neg), max=delta_z
+)
+\end{lstlisting}
+
+Only the magnitude path carries gradient:
+$\partial\Delta^{(W)}/\partial\theta = \sign(s_\tau)\cdot\partial m/\partial\theta$
+with $m=\clip(\min(s^+,s^-),\delta_z)$.
+
+\subsection{S2 --- Add $\varepsilon\cdot\hat A$ near decision fault}
+
+When the net ratio deviation is close to zero, the standard sign term
+gives no gradient direction. Inject an additional small advantage-scaled
+term to break the tie:
+\[
+\ell_\tau^{(\text{S2})}
+= \ell_\tau^{(\text{base})}
+  \;+\; \varepsilon_{\text{dir}}\cdot s_\tau \cdot \hat A_\tau\cdot\mathbf 1[\,|s_\tau| < \varepsilon_{\text{patch}}\,],
+\]
+with $\varepsilon_{\text{dir}} \ll 1$ (e.g.\ $10^{-2}$) and
+$\varepsilon_{\text{patch}} \sim \delta_z$ (e.g.\ $3\times 10^{-4}$).
+
+The inserted term is $s_\tau\hat A_\tau$ (the raw PPO first-order signal)
+scaled by a small constant, active only inside the decision-fault
+neighbourhood. It provides a bounded, directive gradient push that
+$\sign$ alone would not provide.
+
+\begin{lstlisting}
+# S2: add small directive term inside |s_tau| < eps_patch
+sign_s  = torch.sign(s_tau).detach()
+delta_w = sign_s * torch.clamp(torch.minimum(s_pos, s_neg), max=delta_z)
+per_traj_base = delta_w * A_tau  # whichever objective's base term
+
+eps_dir   = 1e-2            # 0.01; 1e-3 was too weak to break degenerate ties
+eps_patch = float(delta_z) * 1.0  # or tune separately
+near_fault = (s_tau.abs() < eps_patch).float()
+per_traj  = per_traj_base + eps_dir * s_tau * A_tau * near_fault
+\end{lstlisting}
+
+Equivalent math note: this is a hybrid between S1 (outside the
+$\varepsilon_{\text{patch}}$ ball) and a tiny $s_\tau\hat A_\tau$ bias
+(inside). The bias vanishes exactly on-policy ($s_\tau = 0$), is
+continuous in $s_\tau$ (via the mask), and its magnitude is
+$\varepsilon_{\text{dir}}\cdot\varepsilon_{\text{patch}}\cdot|\hat A|$,
+bounded far below the magnitude-path gradient.
+
+\subsection{S3 --- Custom case-based gradient patch on the decision fault}
+\label{sec:s3}
+
+Hand-wire the backward of $\sign(s^+-s^-)\cdot\min(s^+,s^-)$ to give a
+finite, directive subgradient at the $s^+=s^-$ fault.
+
+\paragraph{Derivation.}
+Let $f(s^+,s^-) = \sign(s^+-s^-)\cdot\min(s^+,s^-)$. For $s^+\neq s^-$,
+ordinary calculus gives
+\[
+\frac{\partial f}{\partial \theta} \;=\;
+\begin{cases}
++\,\dfrac{\partial s^-}{\partial \theta} & s^+ > s^- \quad (\text{case } s^-\text{-is-min}) \\[4pt]
+-\,\dfrac{\partial s^+}{\partial \theta} & s^+ < s^- \quad (\text{case } s^+\text{-is-min})
+\end{cases}
+\]
+At the fault $s^+ = s^-$, we inject a ``competing'' subgradient of
+unit-coefficient in both directions, which corresponds to treating
+$\sign(s^+-s^-)$ as locally linear with slope equal to the $\min$ factor
+normalised out:
+\[
+\left.\frac{\partial f}{\partial \theta}\right|_{\text{S3}}^{s^+=s^-}
+ \;\coloneqq\;
+ \underbrace{\mathbf 1[\text{Both}]\cdot\Bigl(-\tfrac{\partial s^+}{\partial \theta} + \tfrac{\partial s^-}{\partial \theta}\Bigr)}_{\text{competing subgradient at fault}}
+ \;-\; \mathbf 1[s^+\text{-is-min}]\,\tfrac{\partial s^+}{\partial \theta}
+ \;+\; \mathbf 1[s^-\text{-is-min}]\,\tfrac{\partial s^-}{\partial \theta}.
+\]
+Heuristically, the coefficient $(\min(s^+,s^-)/\cdot)$ of the fault term
+is set to $1$ so that the two one-sided subgradients compete smoothly
+around the decision fault, producing a working, finite, directive
+backward at the non-differentiability.
+
+\paragraph{Activation regions.}
+Define a fault-width $\varepsilon_{\text{fault}} > 0$ and:
+\begin{align*}
+\mathbf 1[s^+\text{-is-min}]     &= \mathbf 1\bigl[s^+ < s^- - \tfrac{1}{2}\varepsilon_{\text{fault}}\bigr], \\
+\mathbf 1[s^-\text{-is-min}]     &= \mathbf 1\bigl[s^- < s^+ - \tfrac{1}{2}\varepsilon_{\text{fault}}\bigr], \\
+\mathbf 1[\text{Both}]           &= \mathbf 1\bigl[\,|s^+ - s^-| \leq \tfrac{1}{2}\varepsilon_{\text{fault}}\,\bigr].
+\end{align*}
+The three indicators partition the $(s^+, s^-)$ plane.
+
+\paragraph{Torch (custom autograd).}
+
+\begin{lstlisting}
+class SignMinS3(torch.autograd.Function):
+    """S3: finite directive gradient at decision fault s+ = s-."""
+    @staticmethod
+    def forward(ctx, s_pos, s_neg, delta_z, eps_fault):
+        # forward is identical to the canonical sign*clip(min,delta)
+        s_min    = torch.minimum(s_pos, s_neg)
+        m        = torch.clamp(s_min, max=delta_z)
+        s_tau    = s_pos - s_neg
+        sign_s   = torch.sign(s_tau)
+        out      = sign_s * m
+        ctx.save_for_backward(s_pos, s_neg, m)
+        ctx.eps_fault = float(eps_fault)
+        ctx.delta_z   = float(delta_z)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        s_pos, s_neg, m = ctx.saved_tensors
+        eps   = ctx.eps_fault
+        diff  = s_pos - s_neg
+
+        # region indicators (partition, mutually exclusive)
+        is_s_plus_min  = (diff < -0.5 * eps).float()  # s+ < s- : s+ is the min
+        is_s_minus_min = (diff >  0.5 * eps).float()  # s- < s+ : s- is the min
+        is_fault       = (diff.abs() <= 0.5 * eps).float()
+
+        # clip-saturation mask: gradient through m is zero above delta_z
+        magn_flow = (torch.minimum(s_pos, s_neg) < ctx.delta_z).float()
+
+        # grad w.r.t. s_pos
+        grad_s_pos  = grad_out * magn_flow * (
+            - is_s_plus_min                # f = -s+  when s+ is min
+            - is_fault                     # competing term at fault
+        )
+        # grad w.r.t. s_neg
+        grad_s_neg  = grad_out * magn_flow * (
+            + is_s_minus_min               # f = +s-  when s- is min
+            + is_fault                     # competing term at fault
+        )
+        return grad_s_pos, grad_s_neg, None, None
+
+# usage
+delta_w = SignMinS3.apply(s_pos, s_neg, delta_z, eps_fault)
+\end{lstlisting}
+
+This is mathematically the same in forward as S1 and gives a bounded,
+non-zero sub-gradient contribution at the sign-boundary manifold.
+
+\paragraph{S3 hyperparameter.}
+$\varepsilon_{\text{fault}}$: width of the fault band. Default
+$\varepsilon_{\text{fault}} = 0.1\,\delta_z$ (a tenth of the clip
+threshold); swept alongside if S3 wins.
+
+% =============================================================================
+\section{D2 (priority 2) --- Empirical aggregation (\texttt{agg\_loss})}
+\label{sec:d2}
+
+\subsection{A1 --- Current: per-trajectory broadcast, seq-mean-token-mean}
+
+$\ell_\tau$ is a scalar per trajectory; expanded to $(B,T)$ via
+\verb|expand_as|, passed to
+\verb|agg_loss(..., loss_agg_mode="seq-mean-token-mean")|. Because
+$\ell_\tau$ is constant along $t$ within each sequence, the token-mean
+step inside \texttt{agg\_loss} is a mathematical no-op; the final loss
+is
+\[
+\hat J^{(\text{A1})} = \tfrac{1}{B_{\text{global}}}\sum_i \ell_{\tau_i}.
+\]
+
+\begin{lstlisting}
+# A1: broadcast per-traj, hard-coded seq-mean-token-mean
+per_token_obj = per_traj.unsqueeze(-1).expand_as(advantages)  # (B, T)
+pg_losses = -per_token_obj
+pg_loss   = agg_loss(
+    loss_mat=pg_losses,
+    loss_mask=response_mask,
+    loss_agg_mode="seq-mean-token-mean",
+    **config.global_batch_info,
+)
+\end{lstlisting}
+
+\subsection{A2 --- Fiber / per-token residue decomposition}
+
+Decompose the per-trajectory signal into a trajectory-level mean plus a
+token-level residue, aggregated jointly:
+\[
+\ell_\tau^{(\text{A2})}
+\;\coloneqq\;
+\underbrace{s_\tau\,\hat A_\tau}_{\text{traj-level}}
+\;+\;
+\underbrace{\tfrac{1}{|\tau|}\sum_{t\in\tau}\clip\!\bigl((r_t-1) - s_\tau,\;\delta_{\text{tok}}\bigr)\cdot\hat A_\tau}_{\text{per-token residue}}.
+\]
+The residue term is zero-mean along $t$ by construction (it's the
+token-wise deviation from the trajectory mean, clipped at
+$\delta_{\text{tok}}$). Under \texttt{seq-mean-token-mean} aggregation
+the residue does not cancel because of the per-token clip; it delivers
+a signal that ordinary A1 cannot (which is why A1, by contrast, sees
+the mean-only quantity $s_\tau$).
+
+\begin{lstlisting}
+# A2: fiber residue, requires per-token objective (not broadcast)
+# ratio       : (B, T)
+# response_mask: (B, T)
+# s_tau       : (B,)   == per-traj mean of (ratio - 1)
+# A_tau       : (B,)
+# delta_tok   : scalar
+
+per_token_dev = ratio - 1.0                                       # (B, T)
+per_token_res = torch.clamp(
+    per_token_dev - s_tau.unsqueeze(-1),
+    min=-delta_tok, max=delta_tok,
+) * response_mask                                                 # (B, T)
+
+seq_lens      = response_mask.sum(-1).clamp(min=1)                # (B,)
+residue_mean  = per_token_res.sum(-1) / seq_lens                  # (B,)
+
+per_traj_A2   = (s_tau + residue_mean) * A_tau                    # (B,)
+# the rest of the objective (Delta-terms, penalties) as usual
+per_traj      = per_traj_A2 + objective_specific_extra_terms
+# then agg_loss as in A1
+\end{lstlisting}
+
+A2 introduces one additional hyperparameter $\delta_{\text{tok}}$
+(token-level clip for residue). Defaults to GSPO's per-token clip scale.
+
+% =============================================================================
+\section{D3 (priority 3) --- Trajectory length normalisation of $s_\tau^\pm$}
+\label{sec:d3}
+
+\subsection{T1 --- Divide by $|\tau|$ (current / Approach 2 \& A3)}
+
+\[
+s_\tau^{\pm,\,(\text{T1})}
+= \tfrac{1}{|\tau|}\sum_{t\in\tau}\max\!\bigl(\pm(r_t-1),\,0\bigr).
+\]
+
+\begin{lstlisting}
+# T1: per-token mean
+seq_lens = response_mask.sum(-1).clamp(min=1)            # (B,)
+dev_pos  = torch.clamp(ratio - 1.0, min=0.0) * response_mask
+dev_neg  = torch.clamp(1.0 - ratio, min=0.0) * response_mask
+s_pos    = dev_pos.sum(-1) / seq_lens                    # (B,)
+s_neg    = dev_neg.sum(-1) / seq_lens                    # (B,)
+\end{lstlisting}
+
+\subsection{T2 --- No division (Approach 1)}
+
+\[
+s_\tau^{\pm,\,(\text{T2})}
+= \sum_{t\in\tau}\max\!\bigl(\pm(r_t-1),\,0\bigr).
+\]
+
+\begin{lstlisting}
+# T2: no division
+dev_pos = torch.clamp(ratio - 1.0, min=0.0) * response_mask
+dev_neg = torch.clamp(1.0 - ratio, min=0.0) * response_mask
+s_pos   = dev_pos.sum(-1)                                # (B,)
+s_neg   = dev_neg.sum(-1)                                # (B,)
+\end{lstlisting}
+
+\paragraph{Companion hyperparameters.}
+T2 changes the scale of $s_\tau^\pm$ by $|\tau|$, so the effective
+clip threshold and learning rate must be co-tuned:
+\[
+\delta_{\text{T2}} \approx |\tau|\cdot\delta_{\text{T1}},
+\qquad
+\text{lr}_{\text{T2}} \approx \text{lr}_{\text{T1}}\cdot|\tau|^{-1}\quad\text{(heuristic)}.
+\]
+
+\textbf{Multi-domain note.} The $s_g^\pm$, $s_{dom}^\pm$ higher-level
+normalisation sweep (sum vs.\ mean, cf.\ \texttt{bisim\_eqs\_canonical\_decomposition.tex})
+is \emph{not} included in this priority-3 sweep; it is deferred to the
+multi-domain rollout and determined by the canonical-decomposition
+theorem (mean at every level).
+
+% =============================================================================
+\section{D3.1 --- \texttt{loss\_agg\_mode}}
+\label{sec:d3.1}
+
+Currently \verb|seq-mean-token-mean| is hard-coded inside
+\verb|compute_policy_loss_bspo|. D3.1 is activated only if D3 chooses T2
+or if A2 is adopted (both of which make the token-level aggregation
+non-trivial).
+
+\subsection{L1 --- \texttt{token-mean}}
+
+$\hat J = \tfrac{1}{\sum_i|\tau_i|}\sum_i\sum_t \ell(i,t)\cdot\mathbf 1[\text{valid}]$.
+Weighted by trajectory length.
+
+\subsection{L2 --- \texttt{seq-mean-token-sum}}
+
+$\hat J = \tfrac{1}{B_{\text{global}}}\sum_i\sum_t\ell(i,t)\cdot\mathbf 1[\text{valid}]$.
+Token-sum per sequence, seq-mean across batch.
+
+\subsection{L3 --- \texttt{seq-mean-token-mean} [current]}
+
+$\hat J = \tfrac{1}{B_{\text{global}}}\sum_i \tfrac{1}{|\tau_i|}\sum_t\ell(i,t)\cdot\mathbf 1[\text{valid}]$.
+
+\begin{lstlisting}
+# change one string argument
+pg_loss = agg_loss(
+    loss_mat=pg_losses,
+    loss_mask=response_mask,
+    loss_agg_mode="token-mean" | "seq-mean-token-sum" | "seq-mean-token-mean",
+    **config.global_batch_info,
+)
+\end{lstlisting}
+
+% =============================================================================
+\section{Sweep execution protocol}
+\label{sec:protocol}
+
+\begin{enumerate}
+\item \textbf{Phase 0 --- Objective sweep.} Fix $(S_1, A_1, T_1, L_3)$.
+Run V1, V2, V3, V4, V5 (5 runs). Rank by final
+\verb|val-core/beyondaime/acc/mean@1| averaged with
+\verb|val-core/aime2025|, \verb|val-core/olympiadbench|. Pick
+$V^\ast \in \{V1,\ldots,V5\}$.
+\item \textbf{Phase 1 --- Sign sweep.} Fix $(V^\ast, A_1, T_1, L_3)$.
+Run S2 and S3 (S1 is already run as part of Phase 0). Pick $S^\ast$.
+\item \textbf{Phase 2 --- Aggregation sweep.} Fix $(V^\ast, S^\ast, T_1, L_3)$.
+Run A2 (A1 already run). Pick $A^\ast$.
+\item \textbf{Phase 3 --- Trajectory normaliser.} Fix
+$(V^\ast, S^\ast, A^\ast, L_3)$. Run T2 with co-tuned
+$(\delta_{\text{T2}}, \text{lr}_{\text{T2}})$. Pick $T^\ast$.
+\item \textbf{Phase 3.1 --- \texttt{loss\_agg\_mode}.} Only if
+$T^\ast = T_2$ or $A^\ast = A_2$. Fix $(V^\ast, S^\ast, A^\ast, T^\ast)$;
+run L1 and L2 (L3 already run). Pick $L^\ast$.
+\item \textbf{Confirmation.} Re-run the final configuration
+$(V^\ast, S^\ast, A^\ast, T^\ast, L^\ast)$ once with a different seed to
+confirm reproducibility.
+\end{enumerate}
+
+\paragraph{Decision metric.}
+Primary: mean of final-step
+\verb|val-core/{beyondaime, aime2025, olympiadbench}/acc/mean@1|.
+Tie-break: best-step average across same three sources. Secondary
+stability metrics (used only for tie-break):
+$\mathrm{std}(\texttt{actor/pg\_loss})$ over last 20 steps,
+$\max(\texttt{actor/grad\_norm})$, final
+$\texttt{actor/bspo\_s\_tau\_abs\_mean}$.
+
+% =============================================================================
+\section{Combo map to \texttt{combo\_40Bra.yaml}}
+
+Each sweep configuration corresponds to a unique \verb|combo_id| for
+launch:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l l l l}
+\toprule
+phase & combos & description & count \\
+\midrule
+0   & \verb|cbsp101..cbsp105| & V1, V2, V3, V4, V5 @ (S1, A1, T1, L3) & 5 \\
+1   & \verb|cbsp11{2,3}| & $V^\ast$ with S2, S3 & 2 \\
+2   & \verb|cbsp121|     & $V^\ast, S^\ast$ with A2 & 1 \\
+3   & \verb|cbsp131|     & $V^\ast, S^\ast, A^\ast$ with T2 & 1 \\
+3.1 & \verb|cbsp14{1,2}| & $V^\ast\ldots T^\ast$ with L1, L2 & 2 \\
+confirm & \verb|cbsp199| & best config, different seed & 1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Total: $12$ runs. At $\sim 20$h/run and $3$ concurrent on the 4-node C11
+profile ($12$ nodes $\leq 28$ available), wall-clock is
+$\lceil 12/3\rceil\cdot 20 = 80$h $\approx$ $3.5$ days.
+
+\end{document}

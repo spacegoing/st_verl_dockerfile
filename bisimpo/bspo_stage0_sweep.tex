@@ -1,0 +1,350 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\small\ttfamily,
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  numbers=none,
+  frame=single,
+  language=Python,
+}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+
+\title{BSPO Stage-0 Sweep --- Execution Plan \\
+\large Single-domain (8 runs) + Multi-domain (5 runs)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+% =============================================================================
+\section{Overview}
+
+Stage 0 covers two independent sweeps: a single-domain sweep focused on
+objective variant + two targeted secondary axes, and a multi-domain sweep
+covering only the five objectives.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{l l l}
+\toprule
+block & what is swept & \# runs \\
+\midrule
+Single-domain --- obj baseline  & V1, V2, V3, V4, V5 at $(S_1, A_1, T_1, L_3)$ & 5 \\
+Single-domain --- sign on V4    & V4 with $S_2$, $S_3$                         & 2 \\
+Single-domain --- agg on V5     & V5 with $A_2$ (fiberPO residue)              & 1 \\
+\midrule
+Multi-domain --- obj baseline   & V1, V2, V3, V4, V5                           & 5 \\
+\bottomrule
+& \textbf{total}                                                               & \textbf{13} \\
+\end{tabular}
+\end{center}
+
+Defaults per \texttt{bspo\_sweep\_plan.tex}: $S_1 = $\verb|.detach()|;
+$A_1 = $ per-traj broadcast with \verb|seq-mean-token-mean|;
+$T_1 = (1/|\tau|)\sum_t(\cdot)$; $L_3 = $\verb|seq-mean-token-mean|.
+
+Hyperparameters shared across all 13 runs: $\delta = 3\!\times\!10^{-4}$,
+$\lambda_{\text{Tj}} = 10^{-3}$, $\lambda_{\text{Grp}} = 10^{-3}$,
+$\lambda_{\text D} = 1$, \verb|ppo_epochs=2|, \verb|total_training_steps=120|,
+\verb|test_freq=10|, \verb|val_before_train=true|, 4-node C11 profile.
+Eval set: the 230-row hard parquet (BeyondAIME 100 + AIME25 30 +
+OlympiadBench 100), routed through \verb|nemogym_server|.
+
+% =============================================================================
+\section{Code additions required before launch}
+
+Two of the five objective variants (V2, V3) and the two secondary-axis
+options (S2/S3 signs, A2 aggregation) are not yet in
+\verb|compute_policy_loss_bspo|. The sweep presupposes these minimal
+additions.
+
+\subsection*{(i) Group-/domain-level aggregation of $s_z^\pm$ and $\hat A_z$}
+
+\begin{lstlisting}
+# inputs: s_pos (B,), s_neg (B,), A_tau (B,)
+# non-tensor batch provides:
+#   group_idx  (B,) int64   -- prompt id
+#   domain_idx (B,) int64   -- data_source id (0 in single-domain)
+
+from torch_scatter import scatter_mean  # or implement with index_add + counts
+
+# --- group level ---
+s_g_pos = scatter_mean(torch.clamp(s_pos - s_neg, min=0),
+                       group_idx, dim=0)                # (n_groups,)
+s_g_neg = scatter_mean(torch.clamp(s_neg - s_pos, min=0),
+                       group_idx, dim=0)
+A_g     = scatter_mean(A_tau, group_idx, dim=0)          # (n_groups,)
+# broadcast back to per-tau: s_g_pos_tau = s_g_pos[group_idx], etc.
+
+# --- domain level ---
+# single-domain: domain_idx is all zeros, so these collapse trivially
+s_dom_pos = scatter_mean(torch.clamp(s_g_pos - s_g_neg, min=0),
+                          domain_g_idx, dim=0)          # (n_domains,)
+s_dom_neg = scatter_mean(torch.clamp(s_g_neg - s_g_pos, min=0),
+                          domain_g_idx, dim=0)
+A_dom     = scatter_mean(A_g, domain_g_idx, dim=0)
+\end{lstlisting}
+
+\subsection*{(ii) V2 and V3 variant branches}
+
+\begin{lstlisting}
+# within compute_policy_loss_bspo, after s_g_*, s_dom_*, A_g, A_dom are ready
+
+delta_g_reg   = torch.clamp(s_g_pos_tau, max=delta_g_tau) \
+                - torch.clamp(s_g_neg_tau, max=delta_g_tau)
+delta_g_w     = torch.sign(s_g_pos_tau - s_g_neg_tau).detach() \
+                * torch.clamp(torch.minimum(s_g_pos_tau, s_g_neg_tau),
+                              max=delta_g_tau)
+# similarly delta_dom_reg, delta_dom_w at domain level
+# pen_g, pen_dom analogous to pen_tau
+
+if variant == "hierarchy":            # V2
+    per_traj = (delta_reg - delta_g_reg) * A_tau
+elif variant == "strict_wasserstein": # V3
+    per_traj = (delta_dom_w  * A_dom
+              + delta_g_w    * A_g
+              + delta_w      * A_tau)
+\end{lstlisting}
+
+\subsection*{(iii) S2 and S3 sign treatments}
+
+Per \texttt{bspo\_sweep\_plan.tex}~\S3. S2 is a mask-and-add; S3 is a
+\verb|torch.autograd.Function| subclass.
+
+\subsection*{(iv) A2 fiberPO residue aggregation}
+
+Per \texttt{bspo\_sweep\_plan.tex}~\S4. Replaces the broadcast-then-agg
+step; per-token residue added inside the per-trajectory scalar.
+
+\subsection*{(v) New \texttt{bspo\_variant} values and \texttt{bspo\_sign\_mode}/\texttt{bspo\_agg\_mode} config fields}
+
+Add to \verb|verl/verl/workers/config/actor.py| and
+\verb|verl/verl/trainer/config/actor/actor.yaml|:
+\begin{lstlisting}
+# actor.yaml
+bspo_variant: simplest   # simplest | hierarchy | strict_wasserstein | w_penalty | w_penalty_only
+bspo_sign_mode: detach   # detach | near_fault_bias | case_patch
+bspo_agg_mode: broadcast # broadcast | fiberpo_residue
+bspo_sign_eps_dir: 1.0e-2      # 0.01; 1e-3 too weak to break sign ties at fault
+bspo_sign_eps_patch: 3.0e-4
+bspo_sign_eps_fault: 3.0e-5   # 0.1 * delta
+bspo_agg_delta_tok: 0.2       # gsPO per-token scale
+\end{lstlisting}
+
+% =============================================================================
+\section{Single-domain sweep matrix (8 runs)}
+\label{sec:sd-matrix}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{l l c c c c c l}
+\toprule
+combo\_id & block & V & S & A & T & L & notes \\
+\midrule
+\verb|cbsp101| & obj baseline   & V1 & S1 & A1 & T1 & L3 & simplest \\
+\verb|cbsp102| & obj baseline   & V2 & S1 & A1 & T1 & L3 & hierarchy, needs $s_g$ \\
+\verb|cbsp103| & obj baseline   & V3 & S1 & A1 & T1 & L3 & strict Wasserstein, needs $s_g, s_{dom}$ \\
+\verb|cbsp104| & obj baseline   & V4 & S1 & A1 & T1 & L3 & w\_penalty \\
+\verb|cbsp105| & obj baseline   & V5 & S1 & A1 & T1 & L3 & w\_penalty\_only \\
+\midrule
+\verb|cbsp114| & sign on V4     & V4 & S2 & A1 & T1 & L3 & V4 + near-fault bias \\
+\verb|cbsp115| & sign on V4     & V4 & S3 & A1 & T1 & L3 & V4 + case-patch autograd \\
+\midrule
+\verb|cbsp125| & agg on V5      & V5 & S1 & A2 & T1 & L3 & V5 + fiberPO residue \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Rationale for the secondary axes.}
+$S_2, S_3$ on V4 and not on V5: V4 uses
+$\Delta_\tau^{(W)}\hat A_\tau$ whose $\sign$ factor is exactly the term
+the sign-gradient sweep is designed to probe. V5's main term is
+$s_\tau\hat A_\tau$, which already has full gradient flow through
+$s_\tau$ and does not require a sign handler. Conversely, the fiberPO
+residue decomposition targets the $s_\tau\hat A_\tau$ term directly
+(it replaces the trajectory mean by mean + per-token residue); V5 is
+the cleanest place to apply it, and V4's additional clip structure
+would confound the residue contribution.
+
+\paragraph{Launch.}
+\verb|bash bisimpo/launch_stage0_sd.sh|. Script submits all 8 in
+sequence, 4 concurrent on the C11 profile ($8\cdot 4 = 32$ nodes; we
+have $28$, so 7 run concurrently and 1 queues).
+
+% =============================================================================
+\section{Multi-domain sweep matrix (5 runs)}
+\label{sec:md-matrix}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{l l c c c c c l}
+\toprule
+combo\_id & block & V & S & A & T & L & notes \\
+\midrule
+\verb|cbsp201| & obj baseline   & V1 & S1 & A1 & T1 & L3 & simplest, all domains \\
+\verb|cbsp202| & obj baseline   & V2 & S1 & A1 & T1 & L3 & hierarchy \\
+\verb|cbsp203| & obj baseline   & V3 & S1 & A1 & T1 & L3 & strict Wasserstein \\
+\verb|cbsp204| & obj baseline   & V4 & S1 & A1 & T1 & L3 & w\_penalty \\
+\verb|cbsp205| & obj baseline   & V5 & S1 & A1 & T1 & L3 & w\_penalty\_only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Training data.}
+Multi-domain train set: \verb|0320_split/train.parquet| with all six
+\verb|nemogym_*| sources (math, code, mcqa, if, structured, workplace).
+Curriculum sampler uses \verb|domain_balanced=true|.
+
+\paragraph{Eval data.}
+Identical 230-row hard parquet as single-domain (all three sources are
+math-family). Multi-domain models are expected to score lower on pure
+math eval than single-domain specialists; the goal of multi-domain
+Stage 0 is to confirm that the objective variants \emph{rank the same
+way} as in single-domain, before activating any secondary sweep.
+
+\paragraph{Launch.}
+\verb|bash bisimpo/launch_stage0_md.sh|. Script submits all 5
+concurrently on the $16$-node profile ($5\cdot 16 = 80$ nodes; exceeds
+available, so 1 runs, 4 queue). Alternatively dispatch on the 4-node
+C11 profile to match single-domain parallelism; note that curriculum
+ramp timing was tuned for 16-node so C11 may underperform on
+multi-domain.
+
+% =============================================================================
+\section{Combo YAML additions}
+\label{sec:yaml}
+
+Append to \verb|verl/my_scripts/k8s/config/combo_40Bra.yaml|. The
+\verb|bspo_variant| / \verb|bspo_sign_mode| / \verb|bspo_agg_mode|
+fields reference the new actor-config entries (\S2.v).
+
+\begin{lstlisting}
+# Stage 0 single-domain obj baseline
+cbsp101: { bspo_variant: simplest,            ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+cbsp102: { bspo_variant: hierarchy,           ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+cbsp103: { bspo_variant: strict_wasserstein,  ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+cbsp104: { bspo_variant: w_penalty,           ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+cbsp105: { bspo_variant: w_penalty_only,      ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+
+# Stage 0 single-domain sign sweep on V4
+cbsp114: { bspo_variant: w_penalty, bspo_sign_mode: near_fault_bias, ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+cbsp115: { bspo_variant: w_penalty, bspo_sign_mode: case_patch,      ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+
+# Stage 0 single-domain agg sweep on V5
+cbsp125: { bspo_variant: w_penalty_only, bspo_agg_mode: fiberpo_residue, ppo_epochs: 2, total_training_steps: 120, domains: nemogym_math }
+
+# Stage 0 multi-domain obj baseline
+cbsp201: { bspo_variant: simplest,            ppo_epochs: 2, total_training_steps: 120, domains: all }
+cbsp202: { bspo_variant: hierarchy,           ppo_epochs: 2, total_training_steps: 120, domains: all }
+cbsp203: { bspo_variant: strict_wasserstein,  ppo_epochs: 2, total_training_steps: 120, domains: all }
+cbsp204: { bspo_variant: w_penalty,           ppo_epochs: 2, total_training_steps: 120, domains: all }
+cbsp205: { bspo_variant: w_penalty_only,      ppo_epochs: 2, total_training_steps: 120, domains: all }
+\end{lstlisting}
+
+All entries inherit the common BSPO defaults
+(\verb|fapo_delta: 0.5|, unused; \verb|curriculum_total_steps: 300|;
+\verb|save_freq: 9999|) from the existing combo family.
+
+% =============================================================================
+\section{Launch scripts}
+
+Two bash scripts mirror \verb|bisimpo/launch_phase1.sh|.
+
+\begin{lstlisting}[language=bash]
+# bisimpo/launch_stage0_sd.sh
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for combo in cbsp101 cbsp102 cbsp103 cbsp104 cbsp105 \
+             cbsp114 cbsp115 cbsp125; do
+    echo "=== launching $combo ==="
+    NNODES=4 "$HERE/submit_bspo.sh" "$combo" 2>&1 | grep -E 'name=|variant=' | head -2
+    sleep 3
+done
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash]
+# bisimpo/launch_stage0_md.sh
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for combo in cbsp201 cbsp202 cbsp203 cbsp204 cbsp205; do
+    echo "=== launching $combo ==="
+    NNODES=4 "$HERE/submit_bspo.sh" "$combo" 2>&1 | grep -E 'name=|variant=' | head -2
+    sleep 3
+done
+\end{lstlisting}
+
+\verb|submit_bspo.sh| is updated to dispatch the three new config fields
+(\verb|bspo_variant|, \verb|bspo_sign_mode|, \verb|bspo_agg_mode|) as
+Hydra CLI overrides driven by the combo-yaml field values.
+
+% =============================================================================
+\section{Wall-clock budget}
+
+At $\sim 20$h per run on the 4-node C11 profile and $28$ usable nodes:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{l c c c l}
+\toprule
+block & runs & nodes & concurrent & wall clock \\
+\midrule
+Single-domain                            & 8 & $8\cdot 4 = 32$ & 7 & $\lceil 8/7\rceil\cdot 20 = 40$h \\
+Multi-domain (4-node C11)                & 5 & $5\cdot 4 = 20$ & 5 & $20$h \\
+Combined if parallel\footnote{capacity permitting; single-dom + multi-dom together need $32+20=52$ nodes, exceeding the 28 available, so runs serialise.}
+                                         & 13 & -- & 7 & $\lceil 13/7\rceil\cdot 20 = 40$h \\
+Combined if serialised                   & 13 & -- & 7 & $40 + 20 = 60$h \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Recommended: launch single-domain first (8 runs, 40h). When $\geq 4$
+single-domain nodes free up, start multi-domain (5 runs, 20h). Total
+elapsed: $\sim 50$h.
+
+% =============================================================================
+\section{Decision metric and what follows}
+
+Same metric as \texttt{bspo\_sweep\_plan.tex}: mean of final-step
+\verb|val-core/{beyondaime, aime2025, olympiadbench}/acc/mean@1|, with
+stability tie-breakers if within $1$pp.
+
+\paragraph{Next stage depends on Stage-0 outcome.}
+\begin{itemize}
+\item \textbf{If V4 single-domain winner.} Pick the best of
+\verb|{cbsp104, cbsp114, cbsp115}| as the V4 configuration. Schedule
+Phase 2 hparam sweep on $\delta\in\{1,3,10\}\times 10^{-4}$,
+$\lambda_{\text{Tj}}\in\{1,3,10\}\times 10^{-3}$ (9-run grid). Combos
+\verb|cbsp301..cbsp309|.
+\item \textbf{If V5 single-domain winner.} Pick between
+\verb|cbsp105| and \verb|cbsp125|. Schedule Phase 2 sweep on
+$\delta$ and $\lambda_{\text{Tj}}$ with the chosen aggregation. Combos
+\verb|cbsp401..cbsp409|.
+\item \textbf{If V1 or V2 wins.} Schedule a $\delta$-only sweep
+($3$--$5$ runs).
+\item \textbf{If V3 wins.} Schedule a $\delta_{\text{D}}$,
+$\delta_{\operatorname{Grp}}$, $\delta_{\operatorname{Tj}}$ three-axis
+reduced sweep ($\sim 9$ runs at balanced scales).
+\item \textbf{Multi-domain winner compared against single-domain winner.}
+Guide Phase 2 scope: if rank orders differ significantly, Phase 2 runs
+both single-domain (specialist) and multi-domain (generalist) grids; if
+they agree, Phase 2 runs only on the single-domain winner's grid and the
+multi-domain generalisation is validated at the end.
+\end{itemize}
+
+\end{document}
