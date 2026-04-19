@@ -34,12 +34,19 @@ case "$COMBO_ID" in
     cbsp101)       VAR=simplest;       DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
     cbsp103)       VAR=w_penalty;      DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
     cbsp104)       VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
-    # Phase-2 sweep slots (variant + hparams filled by caller via CLI override)
-    cbsp201|cbsp202|cbsp203|cbsp204|cbsp205) VAR=simplest; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
-    cbsp301|cbsp302|cbsp303|cbsp304|cbsp305|cbsp306|cbsp307|cbsp308|cbsp309)
-                    VAR=w_penalty;      DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
-    cbsp401|cbsp402|cbsp403|cbsp404|cbsp405|cbsp406|cbsp407|cbsp408|cbsp409)
-                    VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;;
+    # ── Phase-2 preview slots (single-domain hparam variants) ─────────────
+    # Used to fill idle GPU capacity while Phase-1 v2 is in flight. Picks
+    # target the specific failure modes observed in Phase-1 progress logs.
+    cbsp201)       VAR=simplest;       DELTA=1.0e-3; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # V1 looser clip (V1@3e-4 saturated)
+    cbsp202)       VAR=simplest;       DELTA=1.0e-2; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # V1 much looser
+    cbsp203|cbsp204|cbsp205) VAR=simplest; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # reserved slots
+    cbsp301)       VAR=w_penalty;      DELTA=1.0e-3; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # V4 looser clip
+    cbsp302)       VAR=w_penalty;      DELTA=3.0e-4; LAMBDA=1.0e-2; LR_WARMUP=10 ;; # V4 stronger penalty (addresses s_tau drift)
+    cbsp303|cbsp304|cbsp305|cbsp306|cbsp307|cbsp308|cbsp309)
+                    VAR=w_penalty;      DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # reserved slots
+    cbsp401)       VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-2; LR_WARMUP=10 ;; # V5 stronger penalty
+    cbsp402|cbsp403|cbsp404|cbsp405|cbsp406|cbsp407|cbsp408|cbsp409)
+                    VAR=w_penalty_only; DELTA=3.0e-4; LAMBDA=1.0e-3; LR_WARMUP=10 ;; # reserved slots
     *)  echo "error: unknown BSPO combo '$COMBO_ID'" >&2; exit 2 ;;
 esac
 
