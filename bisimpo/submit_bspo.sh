@@ -52,11 +52,13 @@ BSPO_OVR=(
 )
 
 # ── Ablation knobs (non-Category-B, safe to set at run level) ────────────────
+# val_max_samples is inherited from 40bra_16node_sd.yaml (-1 = all 230 rows of
+# the hard-eval parquet). Overriding it here would truncate the eval set
+# non-deterministically across data_sources, so we leave it.
 ABLATE_OVR=(
     "trainer.test_freq=10"
     "trainer.val_before_train=true"
     "trainer.save_freq=9999"
-    "data.val_max_samples=128"
     "trainer.log_val_generations=0"
     "actor_rollout_ref.actor.optim.lr_warmup_steps=$LR_WARMUP"
 )

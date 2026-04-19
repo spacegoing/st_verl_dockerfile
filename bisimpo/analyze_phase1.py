@@ -39,9 +39,12 @@ except ImportError:
 # ── Config ───────────────────────────────────────────────────────────────────
 WANDB_DIR = Path("/mnt/public/lichang93/st_verl_dockerfile/verl/wandb_my_dirs/wandb")
 OUT_DIR = Path("/mnt/public/lichang93/st_verl_dockerfile/bisimpo/analysis/phase1")
-# Keep only runs started after Phase-1 submission (2026-04-18 17:30 UTC)
-CUTOFF_UTC = datetime(2026, 4, 18, 17, 30, 0)
+# Keep only runs started after Phase-1 v2 submission (2026-04-18 18:36 UTC,
+# post-eval-upgrade). The v1 runs launched at 17:30 used the old 125-row
+# nemogym_math eval and were cancelled; we never analyze them.
+CUTOFF_UTC = datetime(2026, 4, 18, 18, 36, 0)
 PHASE1_COMBOS = ("cbsp101", "cbsp103", "cbsp104")
+EVAL_SOURCES = ("beyondaime", "aime2025", "olympiadbench")
 
 # BSPO-specific metric keys that the loss emits (core_algos.py)
 BSPO_KEYS = [
@@ -155,25 +158,32 @@ def summarize(combo, by_step):
     if not steps:
         return None
     final_step = steps[-1]
-    # Validation metric for math
-    val_key = "val-core/nemogym_math/acc/mean@1"
-    val_points = [(s, by_step[s][val_key]) for s in steps if val_key in by_step[s]]
-    last_val = val_points[-1] if val_points else (None, None)
-    best_val = max(val_points, key=lambda x: x[1]) if val_points else (None, None)
+    # Per-source validation stats
+    row = {"combo": combo, "final_step": final_step}
+    for src in EVAL_SOURCES:
+        key = f"val-core/{src}/acc/mean@1"
+        points = [(s, by_step[s][key]) for s in steps if key in by_step[s]]
+        if points:
+            last = points[-1]
+            best = max(points, key=lambda x: x[1])
+            row[f"{src}_last_step"] = last[0]
+            row[f"{src}_last_acc"] = last[1]
+            row[f"{src}_best_step"] = best[0]
+            row[f"{src}_best_acc"] = best[1]
+            row[f"{src}_n_val"] = len(points)
+        else:
+            row[f"{src}_last_step"] = None
+            row[f"{src}_last_acc"] = None
+            row[f"{src}_best_step"] = None
+            row[f"{src}_best_acc"] = None
+            row[f"{src}_n_val"] = 0
     # Training signal (mean over last 20% steps)
     cutoff = steps[int(len(steps) * 0.8)] if len(steps) > 5 else steps[0]
     last_quintile = [s for s in steps if s >= cutoff]
     def _mean(key):
         vals = [by_step[s][key] for s in last_quintile if key in by_step[s]]
         return sum(vals) / len(vals) if vals else None
-    return {
-        "combo": combo,
-        "final_step": final_step,
-        "n_val_points": len(val_points),
-        "last_val_step": last_val[0],
-        "last_val_acc": last_val[1],
-        "best_val_step": best_val[0],
-        "best_val_acc": best_val[1],
+    row.update({
         "mean_pg_loss_Q5": _mean("actor/pg_loss"),
         "mean_grad_norm_Q5": _mean("actor/grad_norm"),
         "mean_entropy_Q5": _mean("actor/entropy"),
@@ -184,7 +194,8 @@ def summarize(combo, by_step):
         "mean_clip_neg_frac_Q5": _mean("actor/bspo_clip_neg_frac"),
         "mean_penalty_active_Q5": _mean("actor/bspo_penalty_active_frac"),
         "mean_per_traj_abs_Q5": _mean("actor/bspo_per_traj_abs_mean"),
-    }
+    })
+    return row
 
 
 def main():
@@ -215,21 +226,22 @@ def main():
     print(f"\n-> {summary_csv}")
 
     # summary.md
-    md_lines = ["# BSPO Phase-1 Summary\n", "\n## Validation accuracy (math)\n\n"]
-    md_lines.append("| combo | variant | final_step | last_val_step | last_val_acc | best_val_step | best_val_acc |\n")
-    md_lines.append("|---|---|---|---|---|---|---|\n")
     var_map = {"cbsp101": "simplest (Obj 1)", "cbsp103": "w_penalty (Obj 3)", "cbsp104": "w_penalty_only (Obj 4)"}
+    md_lines = ["# BSPO Phase-1 Summary\n", "\n## Per-source validation accuracy (final step)\n\n"]
+    md_lines.append("| combo | variant | final_step | beyondaime last | beyondaime best | aime2025 last | aime2025 best | olympiadbench last | olympiadbench best |\n")
+    md_lines.append("|---|---|---|---|---|---|---|---|---|\n")
+    def _f(v): return "—" if v is None else f"{v:.4g}"
     for s in sorted(summaries, key=lambda x: x["combo"]):
         md_lines.append(
             f"| {s['combo']} | {var_map.get(s['combo'], '?')} | {s['final_step']} | "
-            f"{s['last_val_step']} | {s['last_val_acc']} | {s['best_val_step']} | {s['best_val_acc']} |\n"
+            f"{_f(s['beyondaime_last_acc'])}@{s['beyondaime_last_step']} | {_f(s['beyondaime_best_acc'])}@{s['beyondaime_best_step']} | "
+            f"{_f(s['aime2025_last_acc'])}@{s['aime2025_last_step']} | {_f(s['aime2025_best_acc'])}@{s['aime2025_best_step']} | "
+            f"{_f(s['olympiadbench_last_acc'])}@{s['olympiadbench_last_step']} | {_f(s['olympiadbench_best_acc'])}@{s['olympiadbench_best_step']} |\n"
         )
     md_lines.append("\n## Training signal (mean over last 20% of steps)\n\n")
     md_lines.append("| combo | pg_loss | grad_norm | entropy | s_tau_abs | Δ_reg | Δ_w | clip_pos | clip_neg | penalty_active | per_traj_abs |\n")
     md_lines.append("|---|---|---|---|---|---|---|---|---|---|---|\n")
     for s in sorted(summaries, key=lambda x: x["combo"]):
-        def _f(v):
-            return "—" if v is None else f"{v:.4g}"
         md_lines.append(
             f"| {s['combo']} | {_f(s['mean_pg_loss_Q5'])} | {_f(s['mean_grad_norm_Q5'])} | "
             f"{_f(s['mean_entropy_Q5'])} | {_f(s['mean_s_tau_abs_Q5'])} | {_f(s['mean_delta_reg_Q5'])} | "
