@@ -70,3 +70,29 @@ Submitted `qwen3-sd-cbdg-qwen3-smoke-nscnc` @ 17:12 UTC with:
 
 Watching in background (task `b5thiqg8t`). Waiting on first training/global_step or
 terminal error.
+
+## Stage 4 try 1 — vLLM FlashInfer backend incompat
+
+Submitted smoke `qwen3-sd-cbdg-qwen3-smoke-nscnc` at 17:12 UTC. Actor loaded on
+all 16 workers (`actor_module: 1` repeated ×16). Then vLLM engine init failed:
+
+```
+File "/opt/venv/lib/python3.12/site-packages/flashinfer/decode.py", line 948, in plan
+    self._paged_kv_indptr_buf = indptr.to(
+TypeError: to() received an invalid combination of arguments - got (torch.device, non_blocking=NoneType), ...
+```
+
+vLLM's v1 engine picked FlashInfer backend automatically (no `VLLM_ATTENTION_BACKEND`
+env var — I removed the 40Bra `CUTLASS_MLA` earlier). FlashInfer 0.x calls
+`tensor.to(device, non_blocking=None)` which torch rejects (None is not a valid
+bool for `non_blocking`). This is a pinned-version incompatibility between the
+flashinfer wheel in the image and torch.
+
+**Fix:** pin `VLLM_ATTENTION_BACKEND=FLASH_ATTN` in rayjob_qwen3.yaml env list.
+FlashAttn is well-tested for GQA on recent vLLM. Committed on iter_kuberay
+`nemo_bspo_md @ 0668c4e`.
+
+## Stage 4 try 2 — FLASH_ATTN (in progress)
+
+Submitted `qwen3-sd-cbdg-qwen3-smoke-kg7kj` at 17:40 UTC. Watcher `bvsyi0hc7`
+running in background.
