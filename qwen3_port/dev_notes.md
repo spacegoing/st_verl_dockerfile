@@ -96,3 +96,75 @@ FlashAttn is well-tested for GQA on recent vLLM. Committed on iter_kuberay
 
 Submitted `qwen3-sd-cbdg-qwen3-smoke-kg7kj` at 17:40 UTC. Watcher `bvsyi0hc7`
 running in background.
+
+## Stage 4 try 2 — ✅ SUCCEEDED (2026-04-20 18:43 UTC, 78min total)
+
+Full pipeline worked end-to-end with FLASH_ATTN backend. Terminal state:
+```
+qwen3-sd-cbdg-qwen3-smoke-kg7kj  SUCCEEDED  Complete
+  start=17:24:39Z  end=18:43:15Z  (78m)
+```
+
+### Step-0 val (val-before-train) — Qwen3 baseline on BSPO hard-eval
+
+| data_source    | acc@1 |
+|----------------|-------|
+| BeyondAIME     | 0.06  |
+| AIME2025       | 0.067 |
+| OlympiadBench  | 0.43  |
+
+Base model baseline. Much lower than 40Bra on BeyondAIME/AIME2025 (0.33–0.55)
+but matches on OlympiadBench — Qwen3-30B-A3B-Base is weaker on hard math as
+expected for a 3B-active model vs 40Bra's stronger MoE.
+
+### Step 1 (on-policy, bspo simplest, δ=3e-4, λ=1e-2)
+
+| metric                              | value               |
+|-------------------------------------|---------------------|
+| `actor/pg_loss`                     | 0.0                 |
+| `actor/grad_norm`                   | 3.097               |
+| `actor/bspo_s_tau_mean`             | 0.0                 |
+| `actor/bspo_delta_reg_mean`         | 0.0                 |
+| `actor/bspo_penalty_mean`           | 0.0                 |
+| `actor/bspo_clip_pos_frac`          | 0.0                 |
+| `actor/entropy`                     | 1.313               |
+| `critic/score/mean` (reward)        | 0.129               |
+| `response_length/mean`              | 996                 |
+| `timing_s/agent_loop/generate` slow | 247s                |
+
+All `bspo_*` metrics 0 because ppo_epochs=1 → on-policy step with
+log_ratio ≈ 0 → s_pos/s_neg ≈ 0 → zero clip and zero penalty. Exactly the
+same step-1 pattern as 40Bra. Confirms the BSPO loss **runs end-to-end on
+Qwen3-30B-A3B** without crashes; gradient flows (`grad_norm=3.097`).
+
+### Step-1 post-val
+
+| data_source    | acc@1 |
+|----------------|-------|
+| BeyondAIME     | 0.06  |
+| OlympiadBench  | 0.40  |
+
+Essentially unchanged from step 0 (pg_loss=0, no weight update).
+
+## Exit criteria met — Qwen3 port works
+
+Verdict: Qwen3-30B-A3B-Base SD training is wired end-to-end on this cluster.
+
+**Port summary (for B200 cluster or future reference):**
+- Key architectural axes: GQA (not MLA), 48 layers, 128 experts topk 8, rope 1e6.
+- `attention_backend: fused` works (TE fused supports GQA at sm_103).
+- `VLLM_ATTENTION_BACKEND=FLASH_ATTN` is mandatory — FlashInfer (vLLM default)
+  is broken in this image (torch.to(non_blocking=None) incompat).
+- `NVTE_FUSED_ATTN=1` in the rayjob env requires `attention_backend` to match
+  (set either both to fused, or unset env AND use flash).
+- PP=1/EP=8/TP=1 on 2-node is fine; no offload needed (30B fits in 288GB×16 easily).
+- mbridge auto-derives all GQA/rope params from HF config — no manual override needed.
+
+**Files committed:**
+- verl `nemo_bspo_sd_ablation @ 81c87a2b` (attention_backend fix)
+- iter_kuberay `nemo_bspo_md @ 0668c4e` (VLLM_ATTENTION_BACKEND=FLASH_ATTN)
+- main `nemo_bspo_md` (plan.md + dev_notes.md + submit_qwen3.sh wrapper)
+
+Next steps (for when user wakes up): run longer training (e.g. 120 steps with
+bspo w_penalty_only / cbsp401-equivalent hparams) to see if Qwen3 actually
+improves on the math eval, once the 18 sd ablation jobs free up more nodes.
