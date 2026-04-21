@@ -63,14 +63,6 @@ loading already succeeded (`actor_module: 1`), **Stage 2's real goal is met**.
 (1-step, val_before_train=true, bspo simplest, δ=3e-4, λ=1e-2). Override
 `lr_warmup_steps=0` so the 1-step warmup→decay schedule is well-defined.
 
-## Stage 2/3/4 combined — 1-step smoke (in progress)
-
-Submitted `qwen3-sd-cbdg-qwen3-smoke-nscnc` @ 17:12 UTC with:
-  `actor_rollout_ref.actor.optim.lr_warmup_steps=0`
-
-Watching in background (task `b5thiqg8t`). Waiting on first training/global_step or
-terminal error.
-
 ## Stage 4 try 1 — vLLM FlashInfer backend incompat
 
 Submitted smoke `qwen3-sd-cbdg-qwen3-smoke-nscnc` at 17:12 UTC. Actor loaded on
@@ -168,3 +160,76 @@ Verdict: Qwen3-30B-A3B-Base SD training is wired end-to-end on this cluster.
 Next steps (for when user wakes up): run longer training (e.g. 120 steps with
 bspo w_penalty_only / cbsp401-equivalent hparams) to see if Qwen3 actually
 improves on the math eval, once the 18 sd ablation jobs free up more nodes.
+
+## Compromised workarounds — technical debt inventory
+
+Three real workarounds were applied to get the smoke green. Root causes
+remain unfixed. Listed by severity.
+
+### R1 — `VLLM_ATTENTION_BACKEND=FLASH_ATTN` forced
+
+Root cause: FlashInfer wheel in the dev image calls
+`tensor.to(device, non_blocking=None)` (flashinfer/decode.py:948), which this
+image's torch rejects. FlashInfer is vLLM's default v1 backend for GQA on
+recent hardware and likely faster than FLASH_ATTN on paged-KV decode.
+
+Workaround: pin `VLLM_ATTENTION_BACKEND=FLASH_ATTN` in `rayjob_qwen3.yaml`.
+
+Proper fix: bump the flashinfer wheel in `Dockerfile.base` (or downgrade
+torch) so `to(..., non_blocking=None)` works, then drop the env var.
+
+### R2 — `attention_backend: fused` instead of `flash`
+
+Root cause: rayjob env globally sets `NVTE_FUSED_ATTN=1` (inherited from
+40Bra's MLA-era config). TE asserts `attention_backend` must agree with
+the env var — mismatch → hard assertion fail. We chose `fused` to avoid
+editing the rayjob env.
+
+Workaround: `attention_backend: fused` in `qwen3_30b_a3b_2node_sd.yaml`.
+TE's fused kernel does support GQA at sm_103, but it was optimized
+around MLA workloads; the flash path is likely better tuned for plain GQA.
+
+Proper fix: remove `NVTE_FUSED_ATTN=1` from `rayjob_qwen3.yaml` env list
+(leave it for 40Bra's rayjob), then switch this config back to
+`attention_backend: flash`.
+
+### R3 — DeepEP flex dispatcher inherited from 40Bra, unverified for Qwen3
+
+Config has `moe_enable_deepep: true` + `moe_token_dispatcher_type: flex`
+copied from the 40Bra base. The 1-step smoke executed this path without
+error, but DeepEP has shape-sensitive heuristics (128 experts × topk 8 ×
+moe_ffn 768 is a different shape than 40Bra's 256×8×768). We do NOT know
+if this is correct / performant for Qwen3.
+
+Safer fallback (if problems arise in longer runs):
+```yaml
+moe_enable_deepep: false
+moe_token_dispatcher_type: alltoall
+```
+This is slower but well-tested. See `CLAUDE.md` §10 "2-node DeepEP flex
+cross-node — FULLY FIXED" for the DeepEP failure modes we've already seen
+on 40Bra.
+
+## Dismissed warnings worth tracking
+
+- **dynamo recompile ceiling hit on step 1** —
+  `torch._dynamo hit config.recompile_limit (8)` on
+  `bias_dropout_add_fused_train`, reason
+  `tensor 'residual' stride mismatch`. Dynamo falls back to eager for that
+  op. Correctness fine, perf left on the table.
+- **Tokenizer processor warning** —
+  `Failed to create processor: Unsupported processor type: Qwen2TokenizerFast`.
+  Irrelevant for text-only SD; would matter for any VLM use.
+- **Ckpt save untested** — smoke used `save_freq=9999`. A formal run with
+  `save_freq <= total_training_steps` may expose Megatron dist-checkpoint
+  issues specific to Qwen3 shapes.
+
+## Untested (not compromises, just scope)
+
+- Only 1 training step ran. No evidence that training stays stable >1 step.
+- `bspo_*` metrics all 0 at step 1 (on-policy, log_ratio≈0). The
+  non-trivial clip / penalty paths did NOT actually execute yet.
+  Cheapest next test: 5–10 steps with `ppo_epochs=2`.
+- `moe_router_load_balancing_type: none` (standard for RL). Over many
+  steps some experts may go dead — worth watching
+  `actor/expert_load_balance_loss` in a 10-step run.
