@@ -1,0 +1,5 @@
+_step,actor/entropy,actor/grad_norm,actor/lr,actor/pg_clipfrac,actor/pg_clipfrac_lower,actor/pg_loss,actor/ppo_kl,val-core/nemogym_code/acc/mean@1,val-core/nemogym_if/acc/mean@1,val-core/nemogym_mcqa/acc/mean@1,val-core/nemogym_structured/acc/mean@1,val-core/nemogym_workplace/acc/mean@1
+0,,,,,,,,0,0.03846154,0,0,0.14285714
+1,,,,,,,,0,0.07692308,0.11111111,0,0.14285714
+2,,,,,,,,0,0.07692308,0.03703704,0,0.14285714
+3,,,,,,,,0,0.07692308,0,0,0.14285714

@@ -1,0 +1,7 @@
+_step,actor/entropy,actor/fapo_alpha,actor/fapo_fiber_magnitude,actor/fapo_seq_ratio,actor/grad_norm,actor/lr,actor/pg_clipfrac,actor/pg_clipfrac_lower,actor/pg_loss,actor/ppo_kl,val-core/nemogym_code/acc/mean@1,val-core/nemogym_if/acc/mean@1,val-core/nemogym_math/acc/mean@1,val-core/nemogym_mcqa/acc/mean@1,val-core/nemogym_structured/acc/mean@1
+0,,,,,,,,,,,0.13043478,0.65,0.48,0.58823529,0.13333333
+5,0.40136081,1,0,1,0.36209312,8e-07,0,0,0.02209689,0,0.26086957,0.7,0.4,0.41176471,0.13333333
+10,0.39687765,1,0,1,0.30820878,1e-06,0,0,0.05155977,0,0.2173913,0.75,0.48,0.58823529,0.13333333
+15,0.5083257,1,0,1,0.25289127,1e-06,0,0,0.02209703,0,0.26086957,0.7,0.4,0.41176471,0.13333333
+20,0.43330964,1,0,1,0.08236151,1e-06,0,0,0.00736568,0,0.30434783,0.7,0.32,0.35294118,0.2
+25,0.36222264,1,0,1,0.25729729,1e-06,0,0,0.01473128,0,0.2173913,0.75,0.52,0.52941176,0.13333333

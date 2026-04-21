@@ -1,0 +1,4 @@
+_step,actor/entropy,actor/fapo_alpha,actor/fapo_fiber_magnitude,actor/fapo_seq_ratio,actor/grad_norm,actor/lr,actor/pg_clipfrac,actor/pg_clipfrac_lower,actor/pg_loss,actor/ppo_kl,val-core/nemogym_math/acc/mean@1
+0,,,,,,,,,,,0.63333333
+3,,,,,,,,,,,0.8
+5,0.41335523,1,0.0087529,0.99997509,0.05098398,1e-06,0,0,0.0268844,2.013e-05,0.6

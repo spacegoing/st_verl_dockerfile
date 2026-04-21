@@ -1,0 +1,3 @@
+_step,actor/bspo_clip_neg_frac,actor/bspo_clip_pos_frac,actor/bspo_delta_reg_mean,actor/bspo_delta_w_mean,actor/bspo_penalty_active_frac,actor/bspo_penalty_mean,actor/bspo_per_traj_abs_mean,actor/bspo_per_traj_mean,actor/bspo_s_neg_mean,actor/bspo_s_pos_mean,actor/bspo_s_tau_abs_mean,actor/bspo_s_tau_mean,actor/entropy,actor/grad_norm,actor/lr,actor/pg_clipfrac,actor/pg_clipfrac_lower,actor/pg_loss,actor/ppo_kl,val-core/nemogym_math/acc/mean@1
+0,,,,,,,,,,,,,,,,,,,,0.7
+1,,,,,,,,,,,,,,,,,,,,0.7

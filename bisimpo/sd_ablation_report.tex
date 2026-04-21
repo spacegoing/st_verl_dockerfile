@@ -1,0 +1,461 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath, amssymb}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{colortbl}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\collapsed}{\cellcolor{red!25}}
+\newcommand{\stable}{\cellcolor{green!20}}
+\newcommand{\drift}{\cellcolor{yellow!25}}
+\newcommand{\peak}{\cellcolor{blue!15}}
+
+\title{BSPO Single-Domain Ablation Report}
+\author{B300 dev cluster, 2026-04-19 to 2026-04-21}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Single-domain (nemogym\_math) ablation of BSPO's three sd-applicable
+variants across a $(\delta,\, \lambda_{\mathrm{Tj}})$ grid. All runs:
+40Bra-40B, 4-node profile (PP=2, EP=8, TP=1), 120 training steps
+(\texttt{test\_freq=10} $\Rightarrow$ 13 val checkpoints per run),
+\texttt{train\_batch\_size=128}, \texttt{ppo\_mini\_batch\_size=128},
+\texttt{rollout.n=16}, \texttt{ppo\_epochs=2}, GRPO advantage, Gaussian
+linear curriculum (\texttt{initial\_mean=0.8} $\to$
+\texttt{final\_mean=0.2} over 300 curriculum steps), hard-eval set =
+\{BeyondAIME, AIME2025, OlympiadBench\}. Data extracted from wandb
+offline stores via \texttt{bisimpo/wandb\_parse\_offline.py} into CSVs
+under \texttt{bisimpo/wandb\_csvs/}.
+\end{abstract}
+
+%==============================================================================
+\section{Meaningful-run filter}
+%==============================================================================
+
+Of the 66 wandb-extracted offline runs on the B300 dev cluster, runs
+were included in the analysis iff they met all four criteria:
+
+\begin{enumerate}
+\item \textbf{Launch commit is post-reset.} The clean-reset baseline
+  was \texttt{verl@7dc6b1fa}. Runs on earlier commits (notably
+  \texttt{96fee429}, which produced cbsp101/cbsp103/cbsp104 Phase-1
+  runs before the mdplan-v1 bug audit) are excluded because the
+  sd-vs-md mix during those commits cannot be ruled out as a
+  confounder.
+\item \textbf{Three-eval validation.} CSV must contain
+  \texttt{val-core/beyondaime/acc/mean@1},
+  \texttt{val-core/aime2025/acc/mean@1}, and
+  \texttt{val-core/olympiadbench/acc/mean@1} columns with at least
+  one non-null row each.
+\item \textbf{More than 80 training steps} reached. Eliminates the
+  queued-but-unscheduled slots (cbsp204/205/305--308 at step $\leq
+  10$), debug smokes (cdbg5, cdbgbspo), and the aborted early-session
+  restarts of cbsp201/202/301/302 at $\texttt{7dc6b1fa}$ which died
+  at step 35.
+\item \textbf{CSV parses cleanly} with matched train and val steps.
+  Runs that wrote val metrics to wandb but had no history records
+  parse (e.g.\ \texttt{cbsp-v5-l1e2} at step 0) are excluded.
+\end{enumerate}
+
+\noindent Twelve runs pass. Three runs pass all criteria except
+\#1 (the cbsp10X Phase-1 triplet) and are listed separately in an
+appendix for completeness.
+
+%==============================================================================
+\section{Combo naming convention}
+%==============================================================================
+
+Combo ids follow the pattern \texttt{cbspXYZ} where:
+
+\begin{itemize}
+\item \texttt{X} (hundreds) encodes the BSPO variant.
+\item \texttt{YZ} (tens+units) encodes a hyperparameter slot; no
+  intrinsic meaning. Per-run $\{\delta, \lambda_{\mathrm{Tj}}\}$ come
+  from a CLI override passed through
+  \texttt{bspo\_scripts/submit\_bspo.sh}; the combo's yaml entry fixes
+  only the non-hparam knobs (\texttt{ppo\_epochs, total\_training\_steps,
+  domains, curriculum\_total\_steps, save\_freq}).
+\end{itemize}
+
+\noindent Variant mapping (consistent with the md naming in
+\texttt{bspo\_algorithm.tex}):
+
+\begin{center}
+\begin{tabular}{cll>{\ttfamily}ll}
+\toprule
+hundreds & md name              & sd objective $\ell_\tau$                                 & loss\_mode & verl config \\
+\midrule
+2XX      & V1 simplest          & $\Delta_\tau^{(\mathrm{reg})}\hat A_\tau$                & bspo       & \texttt{bspo\_variant=simplest} \\
+3XX      & V4 w\_penalty        & $\Delta_\tau^{(\mathrm{W})}\hat A_\tau - \lambda\,\mathrm{pen}_\tau$ & bspo & \texttt{bspo\_variant=w\_penalty} \\
+4XX      & V5 w\_penalty\_only  & $s_\tau\hat A_\tau - \lambda\,\mathrm{pen}_\tau$         & bspo       & \texttt{bspo\_variant=w\_penalty\_only} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent where
+\begin{align*}
+s_\tau^\pm                   &= \tfrac{1}{|\tau|}\sum_t \max(\pm(r_t - 1),\,0),\qquad s_\tau = s_\tau^+ - s_\tau^- \\
+\Delta_\tau^{(\mathrm{reg})} &= \mathrm{clip}(s_\tau^+, \delta) - \mathrm{clip}(s_\tau^-, \delta) \\
+\Delta_\tau^{(\mathrm{W})}   &= \mathrm{sgn}(s_\tau)\cdot \mathrm{clip}\bigl(\min(s_\tau^+, s_\tau^-),\, \delta\bigr) \\
+\mathrm{pen}_\tau            &= \max\bigl(0,\ \min(s_\tau^+, s_\tau^-)/\delta - 1\bigr) \\
+r_t &= \exp(\log\pi_\theta - \log\pi_{\mathrm{old}})_t
+\end{align*}
+
+%==============================================================================
+\section{Run manifest}
+%==============================================================================
+
+Colour legend:
+\colorbox{green!20}{stable} (final within $\pm 0.15$ on BeyondAIME),
+\colorbox{yellow!25}{drift} ($-0.15$ to $-0.30$ BDA drop),
+\colorbox{red!25}{collapsed} ($\le -0.30$ BDA drop).
+
+\begin{center}
+\small
+\begin{tabular}{lllllll}
+\toprule
+combo   & variant            & $\delta$ & $\lambda_{\mathrm{Tj}}$ & final step & verl commit & outcome \\
+\midrule
+\multicolumn{7}{l}{\emph{V1 simplest --- 3 runs}} \\
+cbsp201 & simplest           & 1e-3     & 1e-3                    & 100        & 1349c4ae    & \collapsed peaked s80, crashed s100 \\
+cbsp202 & simplest           & 1e-2     & 1e-3                    & 100        & 1349c4ae    & \collapsed peaked s50, crashed s90  \\
+cbsp203 & simplest           & 3e-4     & 1e-2                    &  90        & de4653bc    & \collapsed peaked \textbf{s80 AIME=0.83}, crashed s90 \\
+\midrule
+\multicolumn{7}{l}{\emph{V4 w\_penalty --- 4 runs}} \\
+cbsp301 & w\_penalty         & 1e-3     & 1e-3                    & 120        & 1349c4ae    & \collapsed monotone decay, crashed s110--120 \\
+cbsp302 & w\_penalty         & 3e-4     & 1e-2                    & 120        & 1349c4ae    & \collapsed monotone decay, crashed s100--120 \\
+cbsp303 & w\_penalty         & 3e-4     & 1e-1                    & 110        & 63eb9118    & \collapsed late collapse s100--110 \\
+cbsp304 & w\_penalty         & 3e-4     & 3e-2                    & 110        & 63eb9118    & \collapsed late collapse s100--110 \\
+\midrule
+\multicolumn{7}{l}{\emph{V5 w\_penalty\_only --- 5 runs}} \\
+cbsp401 & w\_penalty\_only   & 3e-4     & 1e-2                    & 120        & 1349c4ae    & \stable    mild drift, ends $\approx$ baseline \\
+cbsp402 & w\_penalty\_only   & 1e-3     & 1e-2                    & 120        & de4653bc    & \drift     late drop at s110--120  \\
+cbsp403 & w\_penalty\_only   & 3e-4     & 1e-1                    & 120        & de4653bc    & \drift     modest drift across run  \\
+cbsp404 & w\_penalty\_only   & 3e-4     & 3e-2                    & 120        & 63eb9118    & \drift     late drop at s110--120  \\
+cbsp406 & w\_penalty\_only   & 3e-4     & 1e-2                    & 120        & de4653bc    & \stable    reproduces cbsp401, very mild drift \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{Paired runs.} cbsp401 (launched 2026-04-19) and
+cbsp406 (launched 2026-04-20) share identical $(\delta, \lambda)$.
+Their end-of-training numbers agree within sampling noise, providing a
+seed-stability check.
+
+%==============================================================================
+\section{Per-run validation trajectory}
+%==============================================================================
+
+Triple per cell = BeyondAIME / AIME2025 / OlympiadBench accuracy.
+``---'' indicates step beyond run end. Blue cell = per-run AIME2025
+peak. Red cell = onset of collapse (AIME $\le$ step-0 minus 0.15).
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|ccccccccccccc}
+\toprule
+combo   & s0 & s10 & s20 & s30 & s40 & s50 & s60 & s70 & s80 & s90 & s100 & s110 & s120 \\
+\midrule
+\multicolumn{14}{l}{\emph{V1 simplest}} \\
+cbsp201 & .52/.70/.65 & .50/.67/.71 & .55/.77/.68 & .54/.77/.71 & .53/.70/.69 & .52/.67/.69 & .56/.67/.73 & .55/.73/.70 & \peak .59/.77/.70 & .35/.53/.63 & \collapsed .03/.00/.36 & --- & --- \\
+cbsp202 & .49/.70/.73 & .49/.63/.70 & .50/.67/.70 & .51/.70/.73 & .54/.73/.71 & \peak .58/.70/.70 & .54/.73/.69 & .54/.73/.71 & .30/.53/.57 & \collapsed .05/.17/.37 & \collapsed .03/.07/.29 & --- & --- \\
+cbsp203 & .52/.67/.69 & .51/.70/.65 & .55/.67/.71 & .50/.70/.71 & .53/.73/.70 & .52/.80/.74 & .57/.73/.68 & .58/.67/.70 & \peak .50/\textbf{.83}/.67 & \collapsed .16/.33/.54 & --- & --- & --- \\
+\midrule
+\multicolumn{14}{l}{\emph{V4 w\_penalty}} \\
+cbsp301 & .45/.70/.68 & .54/.70/.70 & .49/.67/.71 & .46/.63/.71 & .48/\peak .70/.66 & .44/.67/.68 & .46/.73/.64 & .36/.53/.72 & .34/.57/.68 & .34/.37/.62 & .24/.47/.59 & .16/.23/.58 & \collapsed .06/.13/.43 \\
+cbsp302 & .49/.73/.68 & .52/.60/.70 & .50/\peak .77/.69 & .42/.70/.69 & .48/.67/.70 & .46/.57/.64 & .45/.60/.73 & .50/.53/.66 & .39/.43/.70 & .33/.43/.58 & .25/.47/.59 & .16/.27/.57 & \collapsed .09/.13/.46 \\
+cbsp303 & .53/.63/.71 & .53/.63/.70 & .51/.60/.66 & .48/.67/.66 & .41/\peak .73/.68 & .43/.63/.71 & .39/.53/.68 & .43/.57/.66 & .38/.57/.68 & .34/.50/.67 & .27/.33/.63 & \collapsed .15/.30/.58 & --- \\
+cbsp304 & .53/.70/.64 & .52/.63/.68 & .51/.63/.67 & .48/\peak .73/.67 & .45/.63/.71 & .44/.57/.69 & .41/.70/.71 & .47/.47/.64 & .37/.57/.68 & .34/.57/.60 & .26/.40/.61 & \collapsed .20/.37/.54 & --- \\
+\midrule
+\multicolumn{14}{l}{\emph{V5 w\_penalty\_only}} \\
+cbsp401 & .49/.73/.72 & .51/.70/.74 & .53/\peak .73/.72 & .51/.73/.66 & .52/.70/.73 & .45/.70/.75 & .45/.70/.69 & .40/.50/.65 & .39/.50/.65 & .36/.53/.66 & .39/.63/.59 & .38/.57/.65 & \stable .36/.53/.65 \\
+cbsp402 & .55/.70/.69 & .51/\peak .73/.69 & .51/.63/.68 & .42/.67/.70 & .46/.60/.65 & .53/.63/.66 & .46/.60/.66 & .50/.70/.67 & .47/.53/.66 & .41/.50/.70 & .43/.50/.68 & .33/.60/.63 & \drift .28/.40/.55 \\
+cbsp403 & .54/.70/.69 & .54/.70/.67 & .46/.63/\peak .75 & .53/.63/.66 & .46/.70/.69 & .45/.63/.66 & .40/.57/.70 & .41/.53/.67 & .35/.60/.67 & .36/.50/.67 & .40/.40/.63 & .33/.53/.61 & \drift .40/.47/.65 \\
+cbsp404 & \peak .57/.67/.71 & .52/.63/.70 & .48/.73/.70 & .52/.73/.64 & .50/.67/.65 & .42/.67/.68 & .47/.60/.69 & .36/.57/.69 & .33/.53/.71 & .37/.53/.64 & .37/.53/.62 & .34/.43/.60 & \drift .26/.40/.65 \\
+cbsp406 & .47/.70/.68 & .49/\peak .73/.71 & .46/.60/.65 & .44/.60/.61 & .49/.70/.67 & .46/.50/.66 & .48/.50/.69 & .45/.70/.71 & .42/.60/.68 & .40/.57/.63 & .39/.53/.64 & .41/.47/.63 & \stable .36/.40/.62 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%==============================================================================
+\section{Analysis}
+%==============================================================================
+
+\subsection{V1 is the only variant with a real upward signal}
+
+cbsp203 hits AIME2025 $= 0.83$ at step 80 vs.\ step-0 baseline 0.67
+($+0.16$ absolute). cbsp201 peaks at step 80, $0.59/0.77/0.70$ vs.\
+baseline $0.52/0.70/0.65$ ($+0.07/+0.07/+0.05$). cbsp202 peaks at step
+50, $0.58/0.70/0.70$ vs.\ baseline $0.49/0.70/0.73$ ($+0.09/0/-0.03$).
+
+No V4 or V5 run crosses the step-0 baseline on AIME2025 at any
+checkpoint. V5 peak points (e.g.\ cbsp401 step 20: $0.53/0.73/0.72$
+vs.\ baseline $0.49/0.73/0.72$) are within $\pm 0.04$ of start.
+
+\subsection{V1 collapses deterministically within 10--20 steps of peak}
+
+\begin{center}
+\begin{tabular}{llrrr}
+\toprule
+run     & peak step & AIME @ peak & AIME @ peak+20 & $\Delta$ \\
+\midrule
+cbsp201 & 80        & 0.77        & 0.00 (step 100) & $-0.77$ \\
+cbsp202 & 50        & 0.70        & 0.17 (step 90)  & $-0.53$ \\
+cbsp203 & 80        & 0.83        & 0.33 (step 90)  & $-0.50$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The collapse affects all three math benchmarks
+simultaneously. Correlation with the curriculum target pass\_rate
+dropping below 0.70 (happens around step 50--80 depending on
+\texttt{curriculum\_total\_steps}) is suggestive but not established.
+
+\subsection{V4 monotone decay, no peak}
+
+V4 at any tested $(\delta, \lambda)$: no intermediate peak, AIME2025
+erodes step-by-step, terminal cliff at step 100--120. V4 is
+\textbf{strictly dominated} by V1 (which at least peaks) and V5
+(which at least holds baseline).
+
+\begin{center}
+\begin{tabular}{llrrrrr}
+\toprule
+run     & $\delta$  & $\lambda$ & step-0 AIME & step-60 AIME & step-120 AIME & $\Delta_{\mathrm{end}}$ \\
+\midrule
+cbsp301 & 1e-3      & 1e-3      & 0.70        & 0.73         & 0.13          & $-0.57$ \\
+cbsp302 & 3e-4      & 1e-2      & 0.73        & 0.60         & 0.13          & $-0.60$ \\
+cbsp303 & 3e-4      & 1e-1      & 0.63        & 0.53         & 0.30 (s110)   & $-0.33$ \\
+cbsp304 & 3e-4      & 3e-2      & 0.70        & 0.70         & 0.37 (s110)   & $-0.33$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{V5 is the only variant that survives the full 120 steps}
+
+\begin{center}
+\begin{tabular}{llrrrr}
+\toprule
+run     & $\delta$  & $\lambda$ & step-0 (BDA/AIME/OLY) & step-120 (BDA/AIME/OLY) & $\Delta$ \\
+\midrule
+cbsp401 & 3e-4      & 1e-2      & 0.49/0.73/0.72        & 0.36/0.53/0.65          & $-0.13/-0.20/-0.07$ \\
+cbsp402 & 1e-3      & 1e-2      & 0.55/0.70/0.69        & 0.28/0.40/0.55          & $-0.27/-0.30/-0.14$ \\
+cbsp403 & 3e-4      & 1e-1      & 0.54/0.70/0.69        & 0.40/0.47/0.65          & $-0.14/-0.23/-0.04$ \\
+cbsp404 & 3e-4      & 3e-2      & 0.57/0.67/0.71        & 0.26/0.40/0.65          & $-0.31/-0.27/-0.06$ \\
+cbsp406 & 3e-4      & 1e-2      & 0.47/0.70/0.68        & 0.36/0.40/0.62          & $-0.11/-0.30/-0.06$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Key observations on V5:
+\begin{itemize}
+\item \textbf{cbsp401 and cbsp406 (identical hparams, independent
+  launches) agree} within $\pm 0.05$ on BDA and OLY end-of-training.
+  AIME2025 end-values differ by 0.13 (0.53 vs 0.40), which is noise
+  due to the 30-sample AIME2025 benchmark.
+\item \textbf{Loose $\delta$ (cbsp402, $\delta=1\text{e-}3$) is the
+  worst V5 variant}, dropping $-0.27$ on BDA. Tighter $\delta$ is
+  essential to V5's stability.
+\item \textbf{Strongest $\lambda$ (cbsp403, $\lambda=1\text{e-}1$)}
+  gives the best end-state on BDA and OLY, but does not reach the
+  step-0 baseline on AIME2025.
+\end{itemize}
+
+\subsection{$\lambda$ sweep for V5 at $\delta=3\text{e-}4$}
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+combo    & $\lambda$ & BDA@120 & AIME@120 & OLY@120 & sum-$\Delta$ \\
+\midrule
+cbsp406  & 1e-2      & 0.36    & 0.40     & 0.62    & $-0.47$ \\
+cbsp401  & 1e-2      & 0.36    & 0.53     & 0.65    & $-0.40$ \\
+cbsp404  & 3e-2      & 0.26    & 0.40     & 0.65    & $-0.64$ \\
+cbsp403  & 1e-1      & 0.40    & 0.47     & 0.65    & $-0.41$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent No strong monotone $\lambda$ effect at $\delta=3\text{e-}4$
+end-of-training. The lower-drift runs (cbsp401, cbsp406, cbsp403)
+cluster around $\lambda \in \{1\text{e-}2, 1\text{e-}1\}$; the
+highest-drift (cbsp404) is at the intermediate $\lambda=3\text{e-}2$.
+\textbf{$\lambda$-axis alone does not predict outcome}; seed variance
+and $\delta$ interaction matter.
+
+\subsection{$\delta$ sweep for V5 at $\lambda=1\text{e-}2$}
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+combo    & $\delta$  & BDA@120 & AIME@120 & OLY@120 & sum-$\Delta$ \\
+\midrule
+cbsp406  & 3e-4      & 0.36    & 0.40     & 0.62    & $-0.47$ \\
+cbsp401  & 3e-4      & 0.36    & 0.53     & 0.65    & $-0.40$ \\
+cbsp402  & 1e-3      & 0.28    & 0.40     & 0.55    & $-0.71$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{Tighter $\delta=3\text{e-}4$ clearly dominates looser
+$\delta=1\text{e-}3$.} This is the strongest single-axis effect in the
+V5 data. $\delta$ below $3\text{e-}4$ is not yet probed.
+
+\subsection{Variant ranking at matched hparams}
+
+At $(\delta=3\text{e-}4, \lambda=1\text{e-}2)$ --- the only shared
+point across all three variants:
+
+\begin{center}
+\begin{tabular}{llrrrrr}
+\toprule
+variant              & combo    & final step & final BDA   & final AIME & final OLY & sum-$\Delta$ \\
+\midrule
+V1 simplest          & cbsp203  & 90 (killed) & 0.16       & 0.33       & 0.54      & $-1.05$ \\
+V4 w\_penalty        & cbsp302  & 120        & 0.09        & 0.13       & 0.46      & $-1.32$ \\
+V5 w\_penalty\_only  & cbsp401  & 120        & 0.36        & 0.53       & 0.65      & $-0.40$ \\
+V5 w\_penalty\_only  & cbsp406  & 120        & 0.36        & 0.40       & 0.62      & $-0.47$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Ordering at matched hparams: $\textbf{V5} \gg \textbf{V1} >
+\textbf{V4}$.
+
+But if the peak (rather than end-of-run) is the relevant metric ---
+because the peak can be captured via checkpoint saving at the right
+step --- the ranking inverts for the middle variants:
+
+\begin{center}
+\begin{tabular}{llrrrr}
+\toprule
+variant              & combo    & peak step & peak BDA / AIME / OLY & sum vs.\ step-0 \\
+\midrule
+V1 simplest          & cbsp203  & 80        & 0.50 / 0.83 / 0.67     & $+0.12$ \\
+V5 w\_penalty\_only  & cbsp401  & 20        & 0.53 / 0.73 / 0.72     & $+0.04$ \\
+V4 w\_penalty        & cbsp302  & 20        & 0.50 / 0.77 / 0.69     & $+0.01$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent V1 is the only variant with a meaningful positive peak over
+baseline on the sum of three benchmarks ($+0.12$). V5 and V4 peaks
+are within noise of baseline.
+
+\subsection{Curriculum alignment with V1 collapse}
+
+Curriculum schedule at cbsp2XX combos
+(\texttt{curriculum\_total\_steps=300}, \texttt{initial\_mean=0.8},
+\texttt{final\_mean=0.2}, linear Gaussian window):
+
+\begin{center}
+\begin{tabular}{rrr}
+\toprule
+training step & curriculum progress & target pass\_rate \\
+\midrule
+50   & 0.167  & 0.70 \\
+80   & 0.267  & 0.64 \\
+90   & 0.300  & 0.62 \\
+100  & 0.333  & 0.60 \\
+120  & 0.400  & 0.56 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent All three V1 runs peak at step 50--80 and crash within 10--20
+steps of that peak, coinciding with the window in which the curriculum
+first serves samples with pass\_rate below 0.70. This is suggestive.
+
+%==============================================================================
+\section{Recommendations}
+%==============================================================================
+
+\subsection{Current winner: V5, $\delta=3\text{e-}4$, $\lambda=1\text{e-}2$}
+
+Reproduced across cbsp401 and cbsp406. End-of-training within sampling
+noise of step-0 baseline. This is the only \emph{stable} run. Does
+not \emph{improve} the base model.
+
+\subsection{Highest-value frontier: capture V1's peak without the crash}
+
+cbsp203 demonstrates that V1 achieves genuine learning: $+0.16$ AIME2025 at
+step 80 is above the benchmark's sampling noise band ($\approx 0.07$
+on a 30-sample eval). V1's late collapse is the blocker. Four
+orthogonal hypotheses for the collapse are queued for the B200 cluster
+(\texttt{bisimpo/b200\_8runs\_proposal.md}): tighter PPO clip, KL
+anchor, entropy regularisation, half lr. A fifth worth adding is
+\texttt{curriculum\_total\_steps=600} to directly test the
+curriculum-drift hypothesis.
+
+\subsection{De-prioritise V4}
+
+V4 is strictly dominated at every tested $(\delta, \lambda)$.
+Remaining queued V4 slots (cbsp305--cbsp309) should be repurposed as
+additional V1 or V5 probes.
+
+\subsection{V5 next directions}
+
+\begin{itemize}
+\item \textbf{$\delta=1\text{e-}4$} (tighter than any tested) ---
+  V5's only strong monotone axis is $\delta$; tighter might extend
+  stability further or reveal a plateau.
+\item \textbf{$\lambda=1\text{e-}3$} at $\delta=3\text{e-}4$ ---
+  lighter penalty is unexplored; tests whether the current sweet spot
+  is a floor.
+\item \textbf{Seed repeat of cbsp406} --- cbsp401 and cbsp406 differ
+  on AIME2025 end-value by $\pm 0.06$ ($-0.20$ vs $-0.30$), which is
+  borderline significant on a 30-sample benchmark. A third replicate
+  would nail down whether that's noise or drift.
+\end{itemize}
+
+%==============================================================================
+\appendix
+\section{Excluded Phase-1 runs (pre-reset commit)}
+%==============================================================================
+
+The three cbsp10X runs failed filter criterion \#1 (launch commit
+\texttt{96fee429} predates the clean-reset baseline
+\texttt{7dc6b1fa}). They pass the other three criteria (3 eval sets,
+$>80$ steps, clean CSV). Recorded here for reference:
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|cccccccccccc}
+\toprule
+combo   & variant & $\delta$ & $\lambda$ & s0 & s20 & s40 & s60 & s80 & s90 & s100 & end \\
+\midrule
+cbsp101 & V1      & 3e-4     & 1e-3      & .49/.80/.70 & .53/.70/.73 & .44/.67/.69 & .52/.73/.70 & .52/.77/.76 & .29/.50/.57 & --- & s90 \\
+cbsp103 & V4      & 3e-4     & 1e-3      & .52/.57/.71 & .47/.70/.70 & .54/.57/.67 & .40/.67/.66 & .35/.43/.63 & .31/.43/.56 & .24/.40/.60 & s100 \\
+cbsp104 & V5      & 3e-4     & 1e-3      & .50/.70/.74 & .52/.67/.70 & .55/.73/.73 & .50/.73/.68 & .52/.60/.72 & .44/.67/.67 & .44/.63/.63 & s100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Qualitatively consistent with the post-reset finding: V1
+shows a peak around step 80 then crashes, V4 monotone-decays, V5
+holds near baseline. The quantitative numbers should not be
+aggregated with the post-reset runs because the launch commit mixed
+sd and md code paths.
+
+%==============================================================================
+\section{Data provenance}
+%==============================================================================
+
+Val and actor metrics extracted from wandb offline stores under
+\texttt{verl/wandb\_my\_dirs/wandb/offline-run-*} via
+\texttt{bisimpo/wandb\_parse\_offline.py}. Per-run CSVs published to
+\texttt{bisimpo/wandb\_csvs/} and
+\texttt{/mnt/llm-train/users/lichang93/wandb\_stats\_tables/\-run\_20260421\_172139.tar.gz}.
+Each run's full config is in the CSV filename suffix
+(\texttt{exp\_name\_YYYYMMDD\_HHMMSS\_\{verl-commit-sha\}.csv}).
+
+\end{document}

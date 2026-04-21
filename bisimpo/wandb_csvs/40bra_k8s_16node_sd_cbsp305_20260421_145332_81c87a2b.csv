@@ -1,0 +1,4 @@
+_step,actor/bspo_clip_neg_frac,actor/bspo_clip_pos_frac,actor/bspo_delta_reg_mean,actor/bspo_delta_w_mean,actor/bspo_penalty_active_frac,actor/bspo_penalty_mean,actor/bspo_per_traj_abs_mean,actor/bspo_per_traj_mean,actor/bspo_s_neg_mean,actor/bspo_s_pos_mean,actor/bspo_s_tau_abs_mean,actor/bspo_s_tau_mean,actor/entropy,actor/grad_norm,actor/lr,actor/pg_clipfrac,actor/pg_clipfrac_lower,actor/pg_loss,actor/ppo_kl,val-core/aime2025/acc/mean@1,val-core/beyondaime/acc/mean@1,val-core/olympiadbench/acc/mean@1
+0,,,,,,,,,,,,,,,,,,,,0.66666667,0.56,0.74
+5,0.49882813,0.49776786,-6.8e-07,0.00041028,0.49659598,3.58212688,0.03581884,-0.03581848,0.00411355,0.00466666,0.00062001,0.00055311,0.41649625,0.21452097,4e-07,0.5,0,0.03581848,7.8e-07,,,
+10,0.49933036,0.49905134,-9e-08,0.00039392,0.4983817,3.48831338,0.03490208,-0.0349016,0.00401965,0.00454966,0.00059382,0.00053001,0.39540416,0.21538532,9e-07,0.5,0,0.0349016,-2.38e-06,0.7,0.49,0.66
