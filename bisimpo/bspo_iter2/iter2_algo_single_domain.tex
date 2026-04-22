@@ -183,22 +183,24 @@ realised \emph{only} in async mode.
   $\delta_{\rm Grp}$) produces one scalar $\epsilon_\tau$ (and
   $\epsilon_g$) per trajectory. Used for every trial unless
   \textsf{async\_clip} is toggled.
-\item[Async:] two hyperparameter values per level:
-  $\delta_{\rm Tj}^{(+)},\delta_{\rm Tj}^{(-)}$ and
-  $\delta_{\rm Grp}^{(+)},\delta_{\rm Grp}^{(-)}$.
-  For a trajectory $\tau$ with advantage $\hat A_\tau$:
-  \begin{align*}
-  \epsilon_\tau &= \dbudget(dom)\,\dbudget(g(\tau))\,
-                   \delta_{\rm Tj}^{(\sign(\hat A_\tau))},\\
-  \epsilon_{g(\tau)} &= \dbudget(dom)\,\dbudget(g(\tau))\,
-                   \delta_{\rm Grp}^{(\sign(\hat A_\tau))}.
-  \end{align*}
-  Targets: $\epsilon_\tau \sim 3\!\times\!10^{-4}$ if
-  $\hat A_\tau>0$, else $\sim 4\!\times\!10^{-4}$.
-  $\epsilon_g$ 10$\times$ larger on both sides.
-  Both sides of each single-trajectory clip (i.e.\ $s_\tau^+$ and
-  $s_\tau^-$) share the same $\epsilon_\tau$; the asymmetry is
-  \emph{between trajectories}, driven by the advantage sign.
+\item[Async:] \emph{applies to $\epsilon_\tau$ only}. Two
+  hyperparameters $\delta_{\rm Tj}^{(+)},\delta_{\rm Tj}^{(-)}$
+  replace the single $\delta_{\rm Tj}$ of sync mode. For a trajectory
+  $\tau$ with advantage $\hat A_\tau$:
+  \[
+  \epsilon_\tau \;=\; \dbudget(dom)\,\dbudget(g(\tau))\,
+                      \delta_{\rm Tj}^{(\sign(\hat A_\tau))},
+  \]
+  with target $\epsilon_\tau \sim 3\!\times\!10^{-4}$ when
+  $\hat A_\tau>0$, else $\sim 4\!\times\!10^{-4}$. Both sides of the
+  single-trajectory clip ($s_\tau^+$ and $s_\tau^-$) share the same
+  chosen $\epsilon_\tau$; the asymmetry is \emph{between
+  trajectories}, driven by advantage sign.
+
+  $\epsilon_g$ is \emph{not} sign-branched in async mode: it stays at
+  the sync definition of \eqref{eq:eps-g} using the single
+  $\delta_{\rm Grp}$. Consequently $\mathrm{pen}_\tau$ (which uses
+  $\epsilon_{g(\tau)}$) is also not affected by the async toggle.
 \end{description}
 
 % -----------------------------------------------------------------------------
@@ -306,9 +308,9 @@ $V_{1b}$ reduces to $V_{1a}$ when $\lambda=0$.
 \[
 \delta_{\rm Tj} > 0,\quad \delta_{\rm Grp} > 0,\quad \lambda \ge 0.
 \]
-In async mode these split into signed pairs:
-$\delta_{\rm Tj}^{(+)}, \delta_{\rm Tj}^{(-)},
-\delta_{\rm Grp}^{(+)}, \delta_{\rm Grp}^{(-)}$.
+In async mode $\delta_{\rm Tj}$ splits into a signed pair
+$\delta_{\rm Tj}^{(+)}, \delta_{\rm Tj}^{(-)}$. $\delta_{\rm Grp}$
+remains single-valued in both modes.
 
 \paragraph{Known constants (single-domain math, iter2 trial configuration).}
 \[
