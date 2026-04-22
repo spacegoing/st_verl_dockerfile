@@ -11,6 +11,24 @@ All paths are repo-relative. "Local" = host PFS
 (`/mnt/public/lichang93/st_verl_dockerfile/`). "Container" =
 `/root/myCodeLab/host/` inside the kuberay pod.
 
+### Two parallel submission pipelines
+
+This dev cluster (B300) submits via a **split-repo** pipeline. The
+consolidated `verl/my_scripts/bspo_scripts/` copy only exists on the
+`verl@nemo_bspo_md` branch and is intended for the B200 cluster. Both
+pipelines have byte-identical logic — use whichever matches the branch
+you have checked out.
+
+| role                 | this cluster (dev, `verl@nemo_bspo_sd_ablation`) | B200 (`verl@nemo_bspo_md`) |
+|----------------------|--------------------------------------------------|-----------------------------|
+| combo dispatcher     | `bisimpo/submit_bspo.sh`                         | `verl/my_scripts/bspo_scripts/submit_bspo.sh` |
+| k8s dispatcher       | `iter_kuberay_32nodes_verl_training/submit/submit.sh` | `verl/my_scripts/bspo_scripts/submit.sh` |
+| RayJob template      | `iter_kuberay_32nodes_verl_training/submit/rayjob.yaml` | `verl/my_scripts/bspo_scripts/rayjob.yaml` |
+
+Only the location differs; the files are verbatim copies of each other.
+The checklist below uses the **dev-cluster** paths. Swap them for the
+B200 paths if reviewing that clone.
+
 ---
 
 ## 1. Quick start — end-to-end manual submission
@@ -18,9 +36,13 @@ All paths are repo-relative. "Local" = host PFS
 ### Example command
 
 ```bash
+# dev cluster (this repo layout):
 cd /mnt/public/lichang93/st_verl_dockerfile
-NNODES=4 verl/my_scripts/bspo_scripts/submit_bspo.sh cbsp401 \
+NNODES=4 bisimpo/submit_bspo.sh cbsp401 \
     'actor_rollout_ref.actor.bspo_delta=3.0e-4 actor_rollout_ref.actor.bspo_lambda_tj=1.0e-2'
+
+# B200 cluster (after `verl` checked out at nemo_bspo_md):
+# NNODES=16 verl/my_scripts/bspo_scripts/submit_bspo.sh cbsp401 '...'
 ```
 
 ### Call stack + file list (top-down)
@@ -29,14 +51,14 @@ NNODES=4 verl/my_scripts/bspo_scripts/submit_bspo.sh cbsp401 \
 [USER SHELL]
   │
   ▼
-verl/my_scripts/bspo_scripts/submit_bspo.sh
+bisimpo/submit_bspo.sh
   - combo_id → {VAR, DELTA, LAMBDA, LR_WARMUP} case table
   - Builds BSPO_OVR + ABLATE_OVR hydra overrides
   - NNODES default: 4
-  - exec ./submit.sh cbsp401 "<merged-overrides>"
+  - exec $HERE/../iter_kuberay_32nodes_verl_training/submit/submit.sh cbsp401 "<overrides>"
   │
   ▼
-verl/my_scripts/bspo_scripts/submit.sh
+iter_kuberay_32nodes_verl_training/submit/submit.sh
   - unset HTTPS_PROXY / export NO_PROXY=<k8s api ip>
   - NNODES case: 16→k8s_b300_16node, 8→k8s_b300_8node_c10,
     4→k8s_b300_4node_c11, 2→k8s_b300_2node_debug
@@ -48,7 +70,7 @@ verl/my_scripts/bspo_scripts/submit.sh
   - kubectl create -f -
   │
   ▼
-verl/my_scripts/bspo_scripts/rayjob.yaml
+iter_kuberay_32nodes_verl_training/submit/rayjob.yaml
   - apiVersion: ray.io/v1, kind: RayJob
   - generateName: bra40-sd-${COMBO_ID}-
   - spec.entrypoint: bash .../run_40bra_k8s_16node_single_domain.sh
@@ -148,11 +170,11 @@ verl/ckpts/40bra_k8s_single_domain/<rayjob_name>/
 
 ### Full file inventory touched by one submission
 
-| layer            | file                                                                 |
+| layer            | file (dev cluster)                                                   |
 |------------------|----------------------------------------------------------------------|
-| shell wrapper    | `verl/my_scripts/bspo_scripts/submit_bspo.sh`                        |
-| kuberay submit   | `verl/my_scripts/bspo_scripts/submit.sh`                             |
-| rayjob template  | `verl/my_scripts/bspo_scripts/rayjob.yaml`                           |
+| shell wrapper    | `bisimpo/submit_bspo.sh`                                             |
+| kuberay submit   | `iter_kuberay_32nodes_verl_training/submit/submit.sh`                |
+| rayjob template  | `iter_kuberay_32nodes_verl_training/submit/rayjob.yaml`              |
 | pod entrypoint   | `verl/my_scripts/k8s/run_40bra_k8s_16node_single_domain.sh`          |
 | Gym startup      | `verl/my_scripts/gym/start_gym_uv.sh`                                |
 |                  | `verl/my_scripts/gym/start_gym_all_nodes.py`                         |
@@ -181,7 +203,7 @@ Everything here sits between `submit_bspo.sh` and the first Python line
 of `main_ppo`. If the RayJob never gets its pods to Running with
 Ray+GPU ready, verl never starts.
 
-### 2.1 `verl/my_scripts/bspo_scripts/rayjob.yaml`
+### 2.1 `iter_kuberay_32nodes_verl_training/submit/rayjob.yaml`
 
 - [ ] **Image**: `image: registry.cn-hangzhou.aliyuncs.com/spacegoing/myverl:ncr2602_vllm012.dev` — registry reachable, tag exists.
 - [ ] **Pull secret**: `imagePullSecrets[].name: aliyunsecret` — secret exists in the namespace.
@@ -196,7 +218,7 @@ Ray+GPU ready, verl never starts.
 - [ ] **VLLM backend**: `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` required on B300 (sm_103). Omit on newer SMs.
 - [ ] **envsubst whitelist intact**: `${COMBO_ID}`, `${NNODES}`, `${WORKER_REPLICAS}` appear literally in the template; `submit.sh` must whitelist exactly these.
 
-### 2.2 `verl/my_scripts/bspo_scripts/submit.sh`
+### 2.2 `iter_kuberay_32nodes_verl_training/submit/submit.sh`
 
 - [ ] `NO_PROXY` set to the k8s API IP so `kubectl` bypasses the proxy.
 - [ ] `NNODES` case statement maps to an existing env yaml under `verl/my_scripts/k8s/config/env/`. An unrecognised NNODES exits 2.
