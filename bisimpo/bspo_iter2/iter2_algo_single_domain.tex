@@ -1,0 +1,457 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+
+\DeclareMathOperator*{\clip}{clip}
+\DeclareMathOperator{\sign}{sgn}
+\newcommand{\Ehat}{\widehat{\mathbb{E}}}
+\newcommand{\dbudget}{\hat d_{\text{budget}}}
+
+\title{BSPO --- Iter2 Formal Algorithm Specification\\Single-Domain}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+% =============================================================================
+\section{Iter2 changes from iter1}
+
+Iter2 is a refinement of the single-domain BSPO spec based on iter1
+empirical observations on the B300 dev cluster (see
+\texttt{bisimpo/sd\_ablation\_report.tex} for iter1 data). Changes:
+
+\begin{enumerate}[label=(\alph*)]
+\item \textbf{Drop $\Delta_\tau^{(\mathrm W)}$.} Iter1 exposed three
+  variants (simplest, w\_penalty using $\mathrm{sgn}(s_\tau)\cdot
+  \clip(\min(s_\tau^+,s_\tau^-),\delta)$, and w\_penalty\_only using
+  $s_\tau\cdot\hat A_\tau$). Iter2 keeps only the regular clip
+  $\Delta_\tau^{(\mathrm{reg})}$. The ``w\_penalty'' iter2 variant now
+  means $\Delta_\tau^{(\mathrm{reg})}\hat A_\tau - \lambda\cdot\mathrm{pen}_\tau$
+  (not the iter1 sign-min form).
+\item \textbf{Per-group and per-trajectory clip thresholds.} Iter1 used
+  a single flat $\delta$ for all levels. Iter2 introduces
+  $\epsilon_\tau$ and $\epsilon_g$ derived from hyperparameters
+  $\delta_{\rm Tj}, \delta_{\rm Grp}$ and a budget allocation
+  $\dbudget$ over groups.
+\item \textbf{$\mathrm{pen}_\tau$ uses $\epsilon_{g(\tau)}$}, not
+  $\epsilon_\tau$. Intentional: the penalty activates when a
+  trajectory's deviation exceeds its \emph{group} budget, not its own
+  trajectory budget.
+\item \textbf{Four advantage variants.} Iter1 used GRPO standard only
+  (Adv~I below). Iter2 adds three alternatives (Adv~II/III/IV) that
+  replace the standard-deviation denominator with a reward-spread
+  measure $R_{\max\text{res}}(dom)$ and/or the group dispersion
+  $\hat d(g)$. The set of legal advantages depends on the chosen
+  budget allocation (pro/const/ipro).
+\item \textbf{Sync / async clip} toggle. Sync (default): a single
+  $\epsilon_\tau$ applied symmetrically on both sides of the clip.
+  Async: $\epsilon_\tau$ is chosen by the sign of $\hat A_\tau$, to
+  match the asymmetric GSPO reference threshold
+  ($3\!\times\!10^{-4}$ for positive advantage,
+  $4\!\times\!10^{-4}$ for negative).
+\item \textbf{Two labeled variants} for iter2: $V_{1a}$ (simplest) and
+  $V_{1b}$ (w\_penalty). The $V_{1a/b}$ labels are within iter2's
+  objective space. The $V_1\ldots V_5$ labels from iter1 retain
+  their iter1 meaning and are not reused.
+\end{enumerate}
+
+% =============================================================================
+\section{Single-domain BSPO (iter2)}
+
+% -----------------------------------------------------------------------------
+\subsection{Inputs and notation}
+
+\begin{itemize}[noitemsep]
+\item Batch of $B$ trajectories. Each trajectory $\tau$ has token count
+  $|\tau|$, token-level policy ratio
+  $r_t = \pi_\theta(a_t\mid s_t)/\pi_{\theta_{\text{old}}}(a_t\mid s_t)$,
+  and scalar reward $R_\tau$.
+\item Groups: trajectories are partitioned by prompt id; $g(\tau)$
+  denotes the group of $\tau$. In single-domain, the sole domain is
+  denoted $dom$; $dom(\tau)=dom(g)=dom$ for every $\tau,g$.
+\item Token counts: $T_g = \sum_{\tau\in g}|\tau|$,
+  $T_{dom}=\sum_{g\in dom}T_g$.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\subsection{Ratio statistics}
+
+\begin{align*}
+s_\tau^{+} &= \frac{1}{|\tau|}\sum_{t=1}^{|\tau|}\max(r_t-1,\,0),
+& s_\tau^{-} &= \frac{1}{|\tau|}\sum_{t=1}^{|\tau|}\max(1-r_t,\,0),
+& s_\tau &= s_\tau^{+} - s_\tau^{-}.
+\end{align*}
+
+% -----------------------------------------------------------------------------
+\subsection{Budget allocation}
+
+\paragraph{Per-level dispersion.}
+\[
+\hat d(z) \;=\; \frac{1}{|z|}\sum_{\tau\in z}\bigl|R_\tau - \bar R_z\bigr|,
+\qquad z\in\{g, dom\}.
+\]
+
+\paragraph{Per-group token weight within a domain.}
+\[
+\hat w(g/dom) \;=\; \frac{T_g^{2}}{T_{dom}^{2}}\,\hat d(g).
+\]
+
+\paragraph{Per-domain budget.}
+\[
+\dbudget(dom) \;=\; \frac{\hat d(dom)}{R_{\max\text{res}}(dom)},
+\qquad
+R_{\max\text{res}}(dom) \;=\; \max_{\tau\in dom}\bigl|R_\tau - \bar R_{dom}\bigr|.
+\]
+
+\paragraph{Per-group budget --- three allocation variants.}
+The allocation redistributes the domain budget across groups in one of
+three shapes.
+
+\begin{equation}
+\dbudget(g) \;=\;
+\begin{dcases}
+\dfrac{\hat w(g/dom)}{\sum_{g'\in dom}\hat w(g'/dom)^{2}}
+  & \text{\textbf{pro} --- proportional to $\hat w(g/dom)$} \\[6pt]
+\dfrac{1}{\sum_{g'\in dom}\hat w(g'/dom)}
+  & \text{\textbf{const} --- equal across groups} \\[6pt]
+\dfrac{1}{T_g\,\hat w(g/dom)}
+  & \text{\textbf{ipro} --- inverse proportional to $T_g\,\hat w(g/dom)$}
+\end{dcases}
+\label{eq:dbudget-g}
+\end{equation}
+
+% -----------------------------------------------------------------------------
+\subsection{Clip thresholds}
+
+\paragraph{Trajectory and group thresholds.}
+\begin{align}
+\epsilon_\tau &= \dbudget(dom(\tau))\;\dbudget(g(\tau))\;\delta_{\rm Tj}
+                    \;\sim\; \epsilon_{\rm GSPO}
+                    \label{eq:eps-tau} \\
+\epsilon_g    &= \dbudget(dom(g))\;\dbudget(g)\;\delta_{\rm Grp}
+                    \;\sim\; 3\!\times\!10^{-3}.
+                    \label{eq:eps-g}
+\end{align}
+
+The $\sim$ is a design guidance: the hyperparameters $\delta_{\rm Tj}$
+and $\delta_{\rm Grp}$ are \emph{not} fixed constants; they are tuned
+so that the resulting $\epsilon_\tau$ and $\epsilon_g$ sit at the
+target scales. The target scales are:
+\begin{itemize}[noitemsep]
+\item $\epsilon_\tau$ near the GSPO reference clip $\epsilon_{\rm GSPO}$
+  ($3\!\times\!10^{-4}$ for positive advantage,
+  $4\!\times\!10^{-4}$ for negative, see \S\ref{sec:async-clip}).
+\item $\epsilon_g$ roughly an order of magnitude larger, near
+  $3\!\times\!10^{-3}$.
+\end{itemize}
+
+\paragraph{Practical tuning notes.}
+\begin{enumerate}[label=(\roman*)]
+\item Given $\epsilon_{\rm GSPO} = 3\!\times\!10^{-4}$, once
+  $\delta_{\rm Tj}$ is set so that $\epsilon_\tau$ lands at this value,
+  $\delta_{\rm Grp}$ can be taken to be
+  $10\!\times\!\delta_{\rm Tj}$ (and $\epsilon_g = 10\epsilon_\tau$
+  follows because the $\dbudget$ factors cancel between \eqref{eq:eps-tau}
+  and \eqref{eq:eps-g}).
+\item The three $\dbudget(g)$ allocation cases
+  (\textbf{pro}, \textbf{const}, \textbf{ipro}) produce different
+  absolute magnitudes, so $\delta_{\rm Tj}$ and $\delta_{\rm Grp}$
+  must be recomputed per allocation to keep $\epsilon_\tau,\epsilon_g$
+  at their target scales.
+\item The $\sim$ guidance in \eqref{eq:eps-tau}--\eqref{eq:eps-g}
+  means: tweak $\delta_{\rm Tj},\delta_{\rm Grp}$ empirically so
+  $\epsilon_\tau$ is on the order of $\epsilon_{\rm GSPO}$ and
+  $\epsilon_g$ is on the order of $3\!\times\!10^{-3}$ --- an exact
+  match is neither required nor guaranteed under all
+  $(\hat d,\,\hat w)$ profiles.
+\end{enumerate}
+
+\paragraph{Sync vs async clip.}\label{sec:async-clip}
+Iter2 supports two clipping modes. The asymmetric
+$\epsilon_{\rm GSPO}$ ($3e\text{-}4$ pos, $4e\text{-}4$ neg) is
+realised \emph{only} in async mode.
+
+\begin{description}
+\item[Sync (default):] a single $\delta_{\rm Tj}$ (and
+  $\delta_{\rm Grp}$) produces one scalar $\epsilon_\tau$ (and
+  $\epsilon_g$) per trajectory. Used for every trial unless
+  \textsf{async\_clip} is toggled.
+\item[Async:] two hyperparameter values per level:
+  $\delta_{\rm Tj}^{(+)},\delta_{\rm Tj}^{(-)}$ and
+  $\delta_{\rm Grp}^{(+)},\delta_{\rm Grp}^{(-)}$.
+  For a trajectory $\tau$ with advantage $\hat A_\tau$:
+  \begin{align*}
+  \epsilon_\tau &= \dbudget(dom)\,\dbudget(g(\tau))\,
+                   \delta_{\rm Tj}^{(\sign(\hat A_\tau))},\\
+  \epsilon_{g(\tau)} &= \dbudget(dom)\,\dbudget(g(\tau))\,
+                   \delta_{\rm Grp}^{(\sign(\hat A_\tau))}.
+  \end{align*}
+  Targets: $\epsilon_\tau \sim 3\!\times\!10^{-4}$ if
+  $\hat A_\tau>0$, else $\sim 4\!\times\!10^{-4}$.
+  $\epsilon_g$ 10$\times$ larger on both sides.
+  Both sides of each single-trajectory clip (i.e.\ $s_\tau^+$ and
+  $s_\tau^-$) share the same $\epsilon_\tau$; the asymmetry is
+  \emph{between trajectories}, driven by the advantage sign.
+\end{description}
+
+% -----------------------------------------------------------------------------
+\subsection{Advantage variants}
+
+GRPO-style per-trajectory advantages. Four cases are supported; legal
+pairings with the $\dbudget(g)$ allocation are listed in
+Table~\ref{tab:adv-alloc}.
+
+\begin{align}
+\textbf{Adv~I (default)}\;:\;
+\hat A_\tau &= \dfrac{R_\tau - \bar R_{g(\tau)}}{\sigma_{g(\tau)} + \varepsilon}
+  \label{eq:adv-I} \\[2pt]
+\textbf{Adv~II}\;:\;
+\hat A_\tau &= \dfrac{R_\tau - \bar R_{g(\tau)}}
+                    {\hat d(g(\tau))\,R_{\max\text{res}}(dom)}
+  \label{eq:adv-II} \\[2pt]
+\textbf{Adv~III}\;:\;
+\hat A_\tau &= \dfrac{R_\tau - \bar R_{g(\tau)}}{R_{\max\text{res}}(dom)}
+  \label{eq:adv-III} \\[2pt]
+\textbf{Adv~IV}\;:\;
+\hat A_\tau &= \hat d(g(\tau))\,\dfrac{R_\tau - \bar R_{g(\tau)}}{R_{\max\text{res}}(dom)}
+  \label{eq:adv-IV}
+\end{align}
+\[
+\text{where}\quad
+\bar R_g = \tfrac{1}{|g|}\sum_{\tau\in g}R_\tau,\quad
+\sigma_g^{2} = \tfrac{1}{|g|}\sum_{\tau\in g}(R_\tau - \bar R_g)^{2}.
+\]
+
+\begin{table}[h]
+\centering
+\caption{Legal advantage $\times$ allocation pairings.}
+\label{tab:adv-alloc}
+\begin{tabular}{lcccc}
+\toprule
+                 & Adv I & Adv II & Adv III & Adv IV \\
+\midrule
+\textbf{pro}    & \checkmark & \checkmark & \checkmark & \checkmark \\
+\textbf{const}  & \checkmark & ---        & ---        & ---        \\
+\textbf{ipro}   & \checkmark & \checkmark & ---        & ---        \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% -----------------------------------------------------------------------------
+\subsection{Clipping operators}
+
+\paragraph{Regular clip $\Delta_\tau^{(\mathrm{reg})}$.}
+\begin{equation}
+\Delta_\tau^{(\mathrm{reg})} \;=\; \clip(s_\tau^{+},\,\epsilon_\tau)
+                               \;-\; \clip(s_\tau^{-},\,\epsilon_\tau).
+\label{eq:delta-reg}
+\end{equation}
+In sync mode $\epsilon_\tau$ is one scalar per trajectory; in async
+mode $\epsilon_\tau$ is drawn from $\{\epsilon_\tau^{(+)},
+\epsilon_\tau^{(-)}\}$ by $\sign(\hat A_\tau)$. Both sides of the clip
+in \eqref{eq:delta-reg} always use the same chosen $\epsilon_\tau$.
+
+\paragraph{Penalty $\mathrm{pen}_\tau$.}
+\begin{equation}
+\mathrm{pen}_\tau \;=\; \max\!\left(0,\;
+  \frac{\min(s_\tau^{+},s_\tau^{-})}{\epsilon_{g(\tau)}} - 1\right).
+\label{eq:pen-tau}
+\end{equation}
+
+Note the denominator: $\epsilon_{g(\tau)}$, not $\epsilon_\tau$. This
+is the deliberate iter2 change: the penalty fires when the bi-lateral
+deviation $\min(s_\tau^+, s_\tau^-)$ exceeds the
+\emph{group}-level budget. Because $\epsilon_g \approx 10\,\epsilon_\tau$,
+most trajectories with normal fluctuations around $\epsilon_\tau$ will
+\emph{not} trigger the penalty; only trajectories whose bi-lateral
+deviation approaches the group budget do.
+
+% -----------------------------------------------------------------------------
+\subsection{Per-trajectory objective}
+
+\begin{align}
+V_{1a}\;\text{(simplest):}\quad
+\ell_\tau &= \Delta_\tau^{(\mathrm{reg})}\,\hat A_\tau
+  \label{eq:v1a} \\[2pt]
+V_{1b}\;\text{(w\_penalty):}\quad
+\ell_\tau &= \Delta_\tau^{(\mathrm{reg})}\,\hat A_\tau
+            \;-\;\lambda\,\mathrm{pen}_\tau
+  \label{eq:v1b}
+\end{align}
+
+$V_{1a}$ and $V_{1b}$ differ \emph{only} by the penalty term; both use
+the same $\Delta^{(\mathrm{reg})}$ and the same chosen $\hat A_\tau$.
+$V_{1b}$ reduces to $V_{1a}$ when $\lambda=0$.
+
+% -----------------------------------------------------------------------------
+\subsection{Aggregated loss}
+
+\[
+\hat J \;=\; \frac{1}{B}\sum_{i=1}^{B}\ell_{\tau_i},
+\qquad
+\mathcal L \;=\; -\hat J.
+\]
+
+% =============================================================================
+\section{Hyperparameters and known constants}
+
+\paragraph{Tunable.}
+\[
+\delta_{\rm Tj} > 0,\quad \delta_{\rm Grp} > 0,\quad \lambda \ge 0.
+\]
+In async mode these split into signed pairs:
+$\delta_{\rm Tj}^{(+)}, \delta_{\rm Tj}^{(-)},
+\delta_{\rm Grp}^{(+)}, \delta_{\rm Grp}^{(-)}$.
+
+\paragraph{Known constants (single-domain math, iter2 trial configuration).}
+\[
+T_g = 16,\qquad
+T_{dom} = 128\times 16 = 2048,\qquad
+R_{\max\text{res}}(dom) = 1.
+\]
+
+$R_{\max\text{res}}(dom)$ should in general be computed during a
+profiling pass; for the single-domain math setup it is given a priori
+($=1$). The formula is retained for reference:
+\[
+R_{\max\text{res}}(dom) \;=\; \max_{\tau\in dom}\bigl|R_\tau - \bar R_{dom}\bigr|.
+\]
+
+\paragraph{Reference clip targets.}
+\[
+\epsilon_{\rm GSPO}^{(+)} \approx 3\!\times\!10^{-4},\qquad
+\epsilon_{\rm GSPO}^{(-)} \approx 4\!\times\!10^{-4},\qquad
+\epsilon_g^{\,\text{target}} \approx 3\!\times\!10^{-3}.
+\]
+
+% =============================================================================
+\section{Trial plan}
+
+Thirteen trials. Dimensions varied: \textsf{algo}
+$\in\{\text{grpo}, \text{bspo}\}$, \textsf{allocation}
+$\in\{\text{pro}, \text{const}, \text{ipro}\}$,
+\textsf{adv} $\in\{\text{adv1}, \text{adv2}, \text{adv3}, \text{adv4}\}$,
+\textsf{curriculum} $\in\{\text{on}, \text{off}\}$,
+\textsf{penalty} $\in\{\text{on}(\lambda), \text{off}\}$,
+\textsf{async\_clip} $\in\{\text{sync}, \text{async}\}$.
+
+For \textsf{algo}=grpo (trials~1--2), BSPO is off: the loss is pure
+verl \texttt{vanilla} (loss\_mode=vanilla) GRPO with the clip from
+\texttt{actor\_rollout\_ref.actor.clip\_ratio\_\{low,high\}}. All
+BSPO-specific dimensions (allocation, adv, penalty, async\_clip)
+do not apply.
+
+For \textsf{algo}=bspo (trials~3--13), the objective follows
+\S2.7 with $V_{1a}$ when \textsf{penalty}=off, $V_{1b}$ when
+\textsf{penalty}=on.
+
+\paragraph{Trials, in priority-1 order.}
+
+\begin{enumerate}[label=\textbf{Trial \arabic*}., wide=0pt]
+
+\item \emph{(priority 1)} Pure GRPO baseline. No BSPO loss, no
+  curriculum. Reference point for all BSPO vs GRPO comparisons.
+
+\item \emph{(priority 2)} GRPO + curriculum. Isolates the
+  contribution of the Gaussian curriculum sampler, independent of the
+  BSPO loss.
+
+\item \emph{(priority 3)} BSPO / \textsf{pro} / Adv~I / no curr /
+  $V_{1a}$ / sync. The canonical BSPO configuration: proportional
+  allocation, standard GRPO advantage (Adv~I by
+  \eqref{eq:adv-I}), simplest objective. Baseline for all
+  subsequent bspo ablations.
+
+\item \emph{(priority 4)} Same as trial~3 plus curriculum. Isolates
+  curriculum effect \emph{within} BSPO.
+
+\item \emph{(priority 5)} Same as trial~3 plus $V_{1b}$ penalty with
+  $\lambda = 1\!\times\!10^{-3}$. Tests whether the penalty term
+  materially changes outcomes at low $\lambda$.
+
+\item \emph{(priority 6)} Same as trial~5 with $\lambda =
+  1\!\times\!10^{-2}$. Completes a one-decade $\lambda$ sweep.
+
+\item \emph{(priority 7)} BSPO / \textsf{const} / Adv~I / no curr /
+  $V_{1a}$ / sync. Swaps \textsf{pro} allocation for \textsf{const}
+  (equal-per-group $\dbudget(g)$). const is the only allocation that
+  forbids Adv~II/III/IV (Table~\ref{tab:adv-alloc}), so adv1 is
+  mandatory.
+
+\item \emph{(priority 8)} BSPO / \textsf{ipro} / Adv~I / no curr /
+  $V_{1a}$ / sync. Swaps to \textsf{ipro} (inverse proportional).
+
+\item \emph{(priority 9)} BSPO / \textsf{pro} / Adv~II / no curr /
+  $V_{1a}$ / sync. Begins adv-variant sweep within pro allocation.
+
+\item \emph{(priority 10)} BSPO / \textsf{pro} / Adv~III / no curr /
+  $V_{1a}$ / sync. Reward-spread-only denominator.
+
+\item \emph{(priority 11)} BSPO / \textsf{pro} / Adv~IV / no curr /
+  $V_{1a}$ / sync. Reward-spread denominator scaled by $\hat d(g)$.
+
+\item \emph{(priority 12)} BSPO / \textsf{ipro} / Adv~II / no curr /
+  $V_{1a}$ / sync. The only non-pro adv-variant combination legal
+  under ipro.
+
+\item \emph{(priority 13)} BSPO / \textsf{pro} / Adv~I / no curr /
+  $V_{1a}$ / \textbf{async}. Trial~3 with async clip. Tests whether
+  the sign-split $\epsilon_\tau^{(\pm)}$ targeting the asymmetric
+  $\epsilon_{\rm GSPO}$ reference ($3e\text{-}4$ / $4e\text{-}4$)
+  changes the training dynamics. This is the only async-clip trial
+  in the iter2 plan.
+
+\end{enumerate}
+
+Priority-1 is the intended execution order: baselines first, then the
+pro-adv1 main axis (curriculum, penalty), then alternative
+allocations, then alternative advantages, then async. The async trial
+is last in queue because it is an orthogonal implementation detail
+and its value depends on the baseline pro-adv1 result.
+
+% =============================================================================
+\appendix
+\section{Trial table (raw)}
+
+The trial plan in the machine-readable form used to schedule the sweep.
+Blank cells in the CSV are rendered as ``---'' in
+Table~\ref{tab:trials-raw}.
+
+\begin{table}[h]
+\centering
+\caption{Iter2 trial plan.}
+\label{tab:trials-raw}
+\begin{tabular}{rrllllllr}
+\toprule
+trial\_id & priority & algo & allocation & adv & curr & penalty & $\lambda$ & async\_clip \\
+\midrule
+ 1 &  1 & grpo & ---   & ---  & ---       & ---          & ---             & --- \\
+ 2 &  2 & grpo & ---   & ---  & with curr & ---          & ---             & --- \\
+ 3 &  3 & bspo & pro   & adv1 & ---       & ---          & ---             & --- \\
+ 4 &  4 & bspo & pro   & adv1 & with curr & ---          & ---             & --- \\
+ 5 &  5 & bspo & pro   & adv1 & ---       & with penalty & $1\!\times\!10^{-3}$ & --- \\
+ 6 &  6 & bspo & pro   & adv1 & ---       & with penalty & $1\!\times\!10^{-2}$ & --- \\
+10 &  7 & bspo & const & adv1 & ---       & ---          & ---             & --- \\
+11 &  8 & bspo & ipro  & adv1 & ---       & ---          & ---             & --- \\
+ 7 &  9 & bspo & pro   & adv2 & ---       & ---          & ---             & --- \\
+ 8 & 10 & bspo & pro   & adv3 & ---       & ---          & ---             & --- \\
+ 9 & 11 & bspo & pro   & adv4 & ---       & ---          & ---             & --- \\
+12 & 12 & bspo & ipro  & adv2 & ---       & ---          & ---             & --- \\
+13 & 13 & bspo & pro   & adv1 & ---       & ---          & ---             & async \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent The rows are sorted here by priority so the appendix table
+matches the execution order. Trial IDs 7--9 have priorities
+9--11 because the adv-variant exploration is deferred until after
+allocation sweeps (trials 10--11, which have priorities 7--8).
+
+\end{document}
