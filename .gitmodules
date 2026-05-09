@@ -1,0 +1,16 @@
+[submodule "verl"]
+	path = verl
+	url = git@github.com:spacegoing/verl.git
+	branch = facpo_merge_kit
+[submodule "my_mergekit"]
+	path = my_mergekit
+	url = git@github.com:spacegoing/my_mergekit.git
+	branch = facpo_merge_kit
+[submodule "lvbc"]
+	path = lvbc
+	url = git@github.com:spacegoing/jd_lvbc_eval_pipe.git
+	branch = facpo_merge_kit
+[submodule "rl_merge_pipeline"]
+	path = rl_merge_pipeline
+	url = git@github.com:spacegoing/rl_merge_pipeline.git
+	branch = facpo_merge_kit
